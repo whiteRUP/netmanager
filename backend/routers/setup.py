@@ -41,7 +41,6 @@ async def _set_config(key: str, value: str, session: AsyncSession):
 
 @router.get("/status")
 async def setup_status(session: AsyncSession = Depends(get_session)):
-    """Frontend checks this on every load to decide: show setup wizard or login."""
     result = await session.execute(
         select(AppConfig).where(AppConfig.key == "setup_complete")
     )
@@ -93,4 +92,13 @@ async def setup_init(
         await _set_config(key, value, session)
 
     await session.commit()
+
+    # Start scheduler now that setup is complete (no restart needed)
+    try:
+        from services.scheduler import start_scheduler
+        await start_scheduler()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Scheduler start after setup failed: {e}")
+
     return {"ok": True, "message": "Setup complete. You can now log in."}
