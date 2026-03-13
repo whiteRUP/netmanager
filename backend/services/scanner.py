@@ -67,10 +67,17 @@ def _nmap_ping_sweep(network: str) -> list:
     nmap -sn sweep across all configured CIDRs.
     Supports comma-separated ranges: "192.168.1.0/24, 10.0.0.0/24"
     Returns list of {ip, mac} dicts.
+
+    nmap output order per host:
+        Nmap scan report for <ip>
+        Host is up (Xs latency).
+        MAC Address: AA:BB:CC:DD:EE:FF (Vendor)   <- comes AFTER "Host is up"
+
+    We collect all lines per host block then emit — never emit mid-block.
     """
     try:
         targets = [n.strip() for n in network.split(",") if n.strip()]
-        results = []
+        results  = []
         seen_ips = set()
 
         for target in targets:
@@ -79,23 +86,41 @@ def _nmap_ping_sweep(network: str) -> list:
                 ["nmap", "-sn", "-T4", "--host-timeout", "3s", target],
                 capture_output=True, text=True, timeout=300
             )
-            ip, mac = None, "00:00:00:00:00:00"
+
+            # Parse by accumulating a current host block
+            current_ip  = None
+            current_mac = "00:00:00:00:00:00"
+            is_up       = False
+
+            def _emit():
+                if current_ip and is_up and current_ip not in seen_ips:
+                    seen_ips.add(current_ip)
+                    results.append({"ip": current_ip, "mac": current_mac})
+
             for line in r.stdout.splitlines():
                 line = line.strip()
+
                 if line.startswith("Nmap scan report for"):
+                    _emit()  # flush previous host
                     parts = line.split()
-                    raw = parts[-1].strip("()")
+                    raw   = parts[-1].strip("()")
                     try:
                         ipaddress.ip_address(raw)
-                        ip = raw
+                        current_ip  = raw
                     except ValueError:
-                        ip = None
-                    mac = "00:00:00:00:00:00"
-                elif "MAC Address:" in line and ip:
-                    mac = line.split("MAC Address:")[1].strip().split()[0].lower()
-                elif line.startswith("Host is up") and ip and ip not in seen_ips:
-                    seen_ips.add(ip)
-                    results.append({"ip": ip, "mac": mac})
+                        current_ip  = None
+                    current_mac = "00:00:00:00:00:00"
+                    is_up       = False
+
+                elif line.startswith("Host is up"):
+                    is_up = True
+
+                elif "MAC Address:" in line and current_ip:
+                    # "MAC Address: AA:BB:CC:DD:EE:FF (Vendor Name)"
+                    mac_part    = line.split("MAC Address:")[1].strip()
+                    current_mac = mac_part.split()[0].lower()
+
+            _emit()  # flush last host
 
         logger.info(f"nmap sweep found {len(results)} hosts")
         return results
