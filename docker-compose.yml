@@ -26,8 +26,8 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
-      - /opt/netmanager/data:/app/data
-      - /opt/netmanager/config:/app/config
+      - /opt/docker/appdata/netmanager/data:/app/data
+      - /opt/docker/appdata/netmanager/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro
     cap_add:
       - NET_ADMIN
