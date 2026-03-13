@@ -1,0 +1,39 @@
+version: "3.9"
+
+# ═══════════════════════════════════════════════════════════════
+#  NetManager — Production Stack
+#  No credentials here — all set via the setup wizard on first run
+# ═══════════════════════════════════════════════════════════════
+
+services:
+
+  frontend:
+    image: ghcr.io/whiterup/netmanager-frontend:latest
+    container_name: netmanager-ui
+    restart: unless-stopped
+    ports:
+      - "3344:80"
+    extra_hosts:
+      - "host-gateway:host-gateway"
+    depends_on:
+      - backend
+    networks:
+      - netmanager
+
+  backend:
+    image: ghcr.io/whiterup/netmanager-backend:latest
+    container_name: netmanager-api
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /opt/netmanager/data:/app/data
+      - /opt/netmanager/config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+networks:
+  netmanager:
+    name: netmanager
+    driver: bridge
