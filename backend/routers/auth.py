@@ -1,19 +1,22 @@
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from datetime import datetime, timedelta
 from pydantic import BaseModel
+import bcrypt
 
 from database import get_session
 from models import AppConfig
 from config import settings
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 async def _get(key: str, session: AsyncSession) -> str:
@@ -65,13 +68,13 @@ async def login(
 ):
     stored_username = await _get("admin_username", session)
     stored_password = await _get("admin_password", session)
-    jwt_secret = await _get("jwt_secret", session)
+    jwt_secret      = await _get("jwt_secret", session)
 
     if not stored_username:
         raise HTTPException(status_code=503, detail="Setup not completed")
 
     if form_data.username != stored_username or \
-       not pwd_context.verify(form_data.password, stored_password):
+       not _verify_password(form_data.password, stored_password):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
 
     token = _make_token(form_data.username, jwt_secret)

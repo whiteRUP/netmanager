@@ -8,15 +8,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from pydantic import BaseModel
-from passlib.context import CryptContext
 from datetime import datetime
 import secrets
+import bcrypt
 
 from database import get_session
 from models import AppConfig
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 async def _get_config(key: str, session: AsyncSession) -> Optional[str]:
@@ -34,9 +37,6 @@ async def _set_config(key: str, value: str, session: AsyncSession):
     else:
         row = AppConfig(key=key, value=value)
     session.add(row)
-
-
-from typing import Optional
 
 
 @router.get("/status")
@@ -65,7 +65,6 @@ async def setup_init(
     session: AsyncSession = Depends(get_session)
 ):
     """One-time setup. Locked after first call."""
-    # Check not already set up
     result = await session.execute(
         select(AppConfig).where(AppConfig.key == "setup_complete")
     )
@@ -77,17 +76,16 @@ async def setup_init(
     if len(payload.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
-    # Generate a random JWT secret
     jwt_secret = secrets.token_hex(32)
 
     configs = {
-        "setup_complete":    "true",
-        "admin_username":    payload.username,
-        "admin_password":    pwd_context.hash(payload.password),
-        "jwt_secret":        jwt_secret,
-        "app_name":          payload.app_name,
-        "scan_network":      payload.scan_network,
-        "ping_interval":     str(payload.ping_interval),
+        "setup_complete":     "true",
+        "admin_username":     payload.username,
+        "admin_password":     _hash_password(payload.password),
+        "jwt_secret":         jwt_secret,
+        "app_name":           payload.app_name,
+        "scan_network":       payload.scan_network,
+        "ping_interval":      str(payload.ping_interval),
         "full_scan_interval": str(payload.full_scan_interval),
     }
 

@@ -4,14 +4,13 @@ from sqlmodel import select
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
-from passlib.context import CryptContext
+import bcrypt
 
 from database import get_session
 from models import AppConfig
 from routers.auth import get_current_user
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 async def _get(key: str, session: AsyncSession) -> str:
@@ -37,10 +36,10 @@ async def get_settings(
     _: str = Depends(get_current_user)
 ):
     return {
-        "app_name": await _get("app_name", session),
-        "admin_username": await _get("admin_username", session),
-        "scan_network": await _get("scan_network", session),
-        "ping_interval": int(await _get("ping_interval", session) or 60),
+        "app_name":           await _get("app_name", session),
+        "admin_username":     await _get("admin_username", session),
+        "scan_network":       await _get("scan_network", session),
+        "ping_interval":      int(await _get("ping_interval", session) or 60),
         "full_scan_interval": int(await _get("full_scan_interval", session) or 900),
     }
 
@@ -80,11 +79,12 @@ async def change_password(
     _: str = Depends(get_current_user)
 ):
     stored = await _get("admin_password", session)
-    if not pwd_context.verify(data.current_password, stored):
+    if not bcrypt.checkpw(data.current_password.encode(), stored.encode()):
         raise HTTPException(400, "Current password is incorrect")
     if len(data.new_password) < 6:
         raise HTTPException(400, "New password must be at least 6 characters")
-    await _set("admin_password", pwd_context.hash(data.new_password), session)
+    hashed = bcrypt.hashpw(data.new_password.encode(), bcrypt.gensalt()).decode()
+    await _set("admin_password", hashed, session)
     await session.commit()
     return {"ok": True}
 
