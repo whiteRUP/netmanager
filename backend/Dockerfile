@@ -5,7 +5,6 @@ RUN apt-get update && apt-get install -y \
     net-tools \
     iputils-ping \
     iproute2 \
-    arp-scan \
     libpcap-dev \
     gcc \
     && rm -rf /var/lib/apt/lists/*

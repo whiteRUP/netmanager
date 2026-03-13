@@ -79,7 +79,7 @@ export default function Discovery() {
                   )}
                 </div>
                 <div style={{ fontSize:12, color:'#64748b', fontFamily:'monospace', marginBottom:8 }}>
-                  {d.mac} {d.manufacturer && `· ${d.manufacturer}`}
+                  {d.mac === '00:00:00:00:00:00' ? 'MAC unknown (cross-subnet)' : d.mac} {d.manufacturer && d.manufacturer !== 'Unknown' && `· ${d.manufacturer}`}
                 </div>
 
                 {/* Signals */}

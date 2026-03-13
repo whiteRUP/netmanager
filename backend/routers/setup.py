@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 import secrets
 import bcrypt
 
@@ -33,7 +33,7 @@ async def _set_config(key: str, value: str, session: AsyncSession):
     row = existing.scalar_one_or_none()
     if row:
         row.value = value
-        row.updated_at = datetime.utcnow()
+        row.updated_at = datetime.now(timezone.utc)
     else:
         row = AppConfig(key=key, value=value)
     session.add(row)

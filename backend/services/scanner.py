@@ -1,5 +1,5 @@
 import asyncio, json, logging, subprocess, ipaddress
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -29,13 +29,37 @@ def last_scan_time() -> Optional[str]:
 
 
 def _mac_vendor(mac: str) -> str:
+    if not mac or mac == "00:00:00:00:00:00":
+        return "Unknown"
     try:
         parser = _get_mac_parser()
         if parser:
-            return parser.get_manuf(mac) or "Unknown"
+            result = parser.get_manuf(mac)
+            # Filter out results that look like MAC prefixes (not real vendor names)
+            if result and len(result) > 3 and not result.replace(":", "").replace("-", "").isalnum():
+                return result
+            if result and len(result) > 3 and not all(c in "0123456789abcdefABCDEF:" for c in result):
+                return result
     except Exception:
         pass
     return "Unknown"
+
+
+def _arp_cache_mac(ip: str) -> str:
+    """Read MAC from system ARP cache — works cross-subnet after a ping."""
+    try:
+        import subprocess
+        r = subprocess.run(["ip", "neigh", "show", ip],
+                           capture_output=True, text=True, timeout=2)
+        for line in r.stdout.splitlines():
+            if ip in line and "lladdr" in line:
+                parts = line.split()
+                idx = parts.index("lladdr")
+                if idx + 1 < len(parts):
+                    return parts[idx + 1].lower()
+    except Exception:
+        pass
+    return "00:00:00:00:00:00"
 
 
 def _nmap_ping_sweep(network: str) -> list:
@@ -148,7 +172,7 @@ async def ping_scan():
     if _scanning:
         return
     _scanning = True
-    _last_scan = datetime.utcnow()
+    _last_scan = datetime.now(timezone.utc)
     try:
         from database import AsyncSessionLocal
         from models import Device, ScanEvent, Alert, AppConfig
@@ -190,7 +214,7 @@ async def ping_scan():
                     was_online = d.status == "online"
                     d.status = "online" if online else "offline"
                     if online:
-                        d.last_seen = datetime.utcnow()
+                        d.last_seen = datetime.now(timezone.utc)
                         found += 1
                     session.add(d)
                     if was_online != online:
@@ -209,7 +233,7 @@ async def ping_scan():
                     found += 1
 
             event.status = "completed"
-            event.completed_at = datetime.utcnow()
+            event.completed_at = datetime.now(timezone.utc)
             event.devices_found = found
             session.add(event)
             await session.commit()
@@ -227,7 +251,7 @@ async def full_scan():
     if _scanning:
         return
     _scanning = True
-    _last_scan = datetime.utcnow()
+    _last_scan = datetime.now(timezone.utc)
     try:
         from database import AsyncSessionLocal
         from models import Device, PendingDevice, ScanEvent, Alert, AppConfig
@@ -249,6 +273,13 @@ async def full_scan():
             if not arp_result:
                 logger.warning("nmap returned 0 hosts — check network range and NET_ADMIN cap")
 
+            # Fill in MACs from ARP cache for cross-subnet hosts (nmap can't get these)
+            for host in arp_result:
+                if host["mac"] == "00:00:00:00:00:00":
+                    cached = _arp_cache_mac(host["ip"])
+                    if cached != "00:00:00:00:00:00":
+                        host["mac"] = cached
+
             r2 = await session.execute(select(Device))
             known = {d.ip for d in r2.scalars().all()}
             r3 = await session.execute(select(PendingDevice))
@@ -263,7 +294,7 @@ async def full_scan():
                     d = r4.scalar_one_or_none()
                     if d:
                         d.status = "online"
-                        d.last_seen = datetime.utcnow()
+                        d.last_seen = datetime.now(timezone.utc)
                         session.add(d)
                     continue
 
@@ -298,7 +329,7 @@ async def full_scan():
                 })
 
             event.status = "completed"
-            event.completed_at = datetime.utcnow()
+            event.completed_at = datetime.now(timezone.utc)
             event.devices_found = len(arp_result)
             event.new_devices = new_count
             session.add(event)

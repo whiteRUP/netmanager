@@ -15,12 +15,21 @@ export default function Layout({ onLogout }) {
   const [stats, setStats]       = useState(null)
   const [scanning, setScanning] = useState(false)
   const [unread, setUnread]     = useState(0)
+  const [appName, setAppName]   = useState('NetManager')
 
   useEffect(() => {
     loadStats()
+    loadAppName()
     const id = setInterval(loadStats, 15000)
     return () => clearInterval(id)
   }, [])
+
+  async function loadAppName() {
+    try {
+      const s = await api.settings.get()
+      if (s.app_name) setAppName(s.app_name)
+    } catch {}
+  }
 
   async function loadStats() {
     try {
@@ -53,7 +62,7 @@ export default function Layout({ onLogout }) {
         <div style={{ padding: '20px 20px 16px', borderBottom: '1px solid rgba(148,163,184,0.1)' }}>
           <div style={{ display:'flex', alignItems:'center', gap:10 }}>
             <span style={{ fontSize:20 }}>🌐</span>
-            <span style={{ fontWeight:700, fontSize:16 }}>NetManager</span>
+            <span style={{ fontWeight:700, fontSize:16 }}>{appName}</span>
           </div>
           {stats && (
             <div style={{ marginTop:10, display:'flex', gap:8, flexWrap:'wrap' }}>
@@ -72,8 +81,7 @@ export default function Layout({ onLogout }) {
               padding: '8px 12px', borderRadius: 8, fontSize: 14,
               color: isActive ? '#38bdf8' : '#94a3b8',
               background: isActive ? 'rgba(56,189,248,0.1)' : 'transparent',
-              transition: '.15s',
-              position: 'relative'
+              transition: '.15s', position: 'relative'
             })}>
               <span style={{ fontSize:16 }}>{icon}</span>
               {label}

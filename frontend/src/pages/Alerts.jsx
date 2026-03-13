@@ -80,8 +80,8 @@ export default function Alerts() {
               <div style={{ fontSize:13, color:'#94a3b8' }}>{a.message}</div>
             </div>
             <div style={{ fontSize:12, color:'#64748b', flexShrink:0, textAlign:'right' }}>
-              <div>{new Date(a.created_at).toLocaleDateString()}</div>
-              <div>{new Date(a.created_at).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}</div>
+              <div>{new Date(a.created_at.endsWith('Z') || a.created_at.includes('+') ? a.created_at : a.created_at + 'Z').toLocaleDateString()}</div>
+              <div>{new Date(a.created_at.endsWith('Z') || a.created_at.includes('+') ? a.created_at : a.created_at + 'Z').toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}</div>
             </div>
           </div>
         ))}

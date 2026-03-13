@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select, col
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 from database import get_session
@@ -156,7 +156,7 @@ async def approve_pending(
         hostname=p.hostname,
         open_ports=p.open_ports,
         first_seen=p.first_seen,
-        last_seen=datetime.utcnow(),
+        last_seen=datetime.now(timezone.utc),
         status="online"
     )
     session.add(d)
@@ -210,7 +210,7 @@ async def update_device(
         raise HTTPException(404, "Device not found")
     for k, v in update.dict(exclude_unset=True).items():
         setattr(d, k, v)
-    d.last_changed = datetime.utcnow()
+    d.last_changed = datetime.now(timezone.utc)
     session.add(d)
     await session.commit()
     await session.refresh(d)
@@ -229,7 +229,7 @@ async def verify_device(
     if not d:
         raise HTTPException(404, "Device not found")
     d.verified = True
-    d.last_changed = datetime.utcnow()
+    d.last_changed = datetime.now(timezone.utc)
     session.add(d)
     await session.commit()
     return {"ok": True}

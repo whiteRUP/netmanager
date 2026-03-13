@@ -203,6 +203,8 @@ function levelIcon(l) { return l==='critical' ? '🔴' : l==='warning' ? '🟡' 
 function levelColor(l) { return l==='critical' ? '#ef4444' : l==='warning' ? '#f59e0b' : '#38bdf8' }
 
 function timeAgo(iso) {
+  // Backend sends naive UTC (no Z suffix) — append Z so JS treats as UTC not local
+  if (iso && !iso.endsWith("Z") && !iso.includes("+")) iso = iso + "Z"
   if (!iso) return ''
   const diff = Date.now() - new Date(iso).getTime()
   const s = Math.floor(diff / 1000)

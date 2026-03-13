@@ -32,7 +32,7 @@ class Token(BaseModel):
 
 
 def _make_token(username: str, secret: str, expire_hours: int = 24) -> str:
-    expire = datetime.utcnow() + timedelta(hours=expire_hours)
+    expire = datetime.now(timezone.utc) + timedelta(hours=expire_hours)
     return jwt.encode(
         {"sub": username, "exp": expire},
         secret,
