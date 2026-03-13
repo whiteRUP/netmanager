@@ -3,6 +3,7 @@ Setup router — handles first-run wizard.
 All endpoints here require NO authentication.
 Once setup is complete, /setup/init returns 409 and is locked forever.
 """
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select

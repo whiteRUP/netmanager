@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Any
+from typing import Any, Optional
 import json, os, httpx
 
 from database import get_session
