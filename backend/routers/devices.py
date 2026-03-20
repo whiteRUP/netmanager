@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlmodel import select, col
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
@@ -59,20 +60,49 @@ async def stats(
     devices = result.scalars().all()
     pending = await session.execute(
         select(PendingDevice).where(PendingDevice.status == "pending"))
-    groups, vlans = {}, {}
+    groups, vlans, types = {}, {}, {}
     for d in devices:
         g = d.group_name or "General"
         groups[g] = groups.get(g, 0) + 1
         if d.vlan:
             vlans[d.vlan] = vlans.get(d.vlan, 0) + 1
+        t = d.device_type or "Unknown"
+        types[t] = types.get(t, 0) + 1
+    # Sort types by count descending
+    types = dict(sorted(types.items(), key=lambda x: -x[1]))
+    # Recently changed status (last 5)
+    recently_changed = sorted(
+        [d for d in devices if d.last_changed],
+        key=lambda d: d.last_changed, reverse=True
+    )[:5]
+    recently_changed_data = [
+        {"id": d.id, "name": d.name, "ip": d.ip, "status": d.status,
+         "icon": d.icon or "❓", "last_changed": d.last_changed.isoformat() if d.last_changed else None}
+        for d in recently_changed
+    ]
+    # Top offline: sorted by longest absent first
+    top_offline = sorted(
+        [d for d in devices if d.status == "offline"],
+        key=lambda d: (d.last_seen or d.first_seen)
+    )[:5]
+    top_offline_data = [
+        {"id": d.id, "name": d.name, "ip": d.ip, "status": "offline",
+         "icon": d.icon or "❓", "last_seen": d.last_seen.isoformat() if d.last_seen else None}
+        for d in top_offline
+    ]
+
     return {
-        "total":    len(devices),
-        "online":   sum(1 for d in devices if d.status == "online"),
-        "offline":  sum(1 for d in devices if d.status == "offline"),
-        "verified": sum(1 for d in devices if d.verified),
-        "pending":  len(pending.scalars().all()),
-        "groups":   groups,
-        "vlans":    vlans,
+        "total":            len(devices),
+        "online":           sum(1 for d in devices if d.status == "online"),
+        "offline":          sum(1 for d in devices if d.status == "offline"),
+        "verified":         sum(1 for d in devices if d.verified),
+        "unverified":       sum(1 for d in devices if not d.verified),
+        "pending":          len(pending.scalars().all()),
+        "groups":           groups,
+        "vlans":            vlans,
+        "types":            types,
+        "recently_changed": recently_changed_data,
+        "top_offline":      top_offline_data,
     }
 
 
@@ -139,25 +169,50 @@ async def list_pending(
     return out
 
 
+class ApproveOverrides(BaseModel):
+    name:        Optional[str] = None
+    device_type: Optional[str] = None
+    icon:        Optional[str] = None
+    group_name:  Optional[str] = None
+
+
 @router.post("/pending/{pending_id}/approve")
 async def approve_pending(
     pending_id: int,
-    session: AsyncSession = Depends(get_session),
-    _: str = Depends(get_current_user)
+    overrides:  ApproveOverrides = ApproveOverrides(),
+    session:    AsyncSession = Depends(get_session),
+    _:          str          = Depends(get_current_user)
 ):
     p = await session.get(PendingDevice, pending_id)
     if not p:
         raise HTTPException(404, "Not found")
+
+    detected_icon = "❓"
+    if overrides.device_type or p.detected_type:
+        TYPE_ICONS = {
+            "Router / AP":"📡","Switch":"🔀","PC / Laptop":"💻","Server / SBC":"🖥️",
+            "Virtual Machine":"🖼️","Raspberry Pi":"🍓","IoT Device":"🔌","Home Assistant":"🏠",
+            "IP Camera":"📷","NAS":"💾","Printer":"🖨️","Phone / Tablet":"📱",
+            "Smart Speaker":"🔊","Media Player":"📺","Game Console":"🎮","Portainer":"🐳",
+            "DNS Server":"🌐","Media Server":"🎬","UPS":"🔋","Linux Device":"🐧",
+            "Windows Device":"🪟","Apple / macOS":"🍎",
+        }
+        dtype = overrides.device_type or p.detected_type or "Unknown"
+        detected_icon = TYPE_ICONS.get(dtype, "❓")
+
     d = Device(
-        name=p.hostname or f"Device-{p.ip.split('.')[-1]}",
-        ip=p.ip, mac=p.mac,
-        manufacturer=p.manufacturer,
-        device_type=p.detected_type or "Unknown",
-        hostname=p.hostname,
-        open_ports=p.open_ports,
-        first_seen=p.first_seen,
-        last_seen=datetime.now(timezone.utc),
-        status="online"
+        name         = overrides.name or p.hostname or f"Device-{p.ip.split('.')[-1]}",
+        ip           = p.ip,
+        mac          = p.mac,
+        manufacturer = p.manufacturer,
+        device_type  = overrides.device_type or p.detected_type or "Unknown",
+        icon         = overrides.icon or detected_icon,
+        hostname     = p.hostname,
+        open_ports   = p.open_ports,
+        group_name   = overrides.group_name or "General",
+        first_seen   = p.first_seen,
+        last_seen    = datetime.now(timezone.utc),
+        status       = "online"
     )
     session.add(d)
     p.status = "approved"

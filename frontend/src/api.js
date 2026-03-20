@@ -84,7 +84,7 @@ export const api = {
   // ── Discovery ───────────────────────────────────────────────────
   pending: {
     list:    ()   => get('/devices/pending/list'),
-    approve: (id) => post(`/devices/pending/${id}/approve`),
+    approve: (id, overrides={}) => post(`/devices/pending/${id}/approve`, overrides),
     reject:  (id) => post(`/devices/pending/${id}/reject`),
   },
 
