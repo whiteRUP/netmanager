@@ -1,13 +1,13 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import logging
 
-logger    = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 
 
 async def start_scheduler():
     if scheduler.running:
-        logger.info("Scheduler already running — skipping start")
+        logger.info("Scheduler already running")
         return
 
     from services.scanner import ping_scan, full_scan
@@ -26,12 +26,24 @@ async def start_scheduler():
 
     scheduler.add_job(ping_scan, "interval", seconds=ping_sec,
                       id="ping_scan", max_instances=1, coalesce=True)
-    scheduler.add_job(full_scan,  "interval", seconds=full_sec,
-                      id="full_scan",  max_instances=1, coalesce=True)
+    scheduler.add_job(full_scan, "interval", seconds=full_sec,
+                      id="full_scan", max_instances=1, coalesce=True)
     scheduler.start()
-    logger.info(f"Scheduler started — ping/{ping_sec}s  full/{full_sec}s")
+    logger.info(f"Scheduler started — ping/{ping_sec}s full/{full_sec}s")
+
+
+async def reschedule(ping_sec: int, full_sec: int):
+    if not scheduler.running:
+        return
+    try:
+        scheduler.reschedule_job("ping_scan", trigger="interval", seconds=ping_sec)
+        scheduler.reschedule_job("full_scan", trigger="interval", seconds=full_sec)
+        logger.info(f"Rescheduled — ping/{ping_sec}s full/{full_sec}s")
+    except Exception as e:
+        logger.warning(f"Reschedule failed: {e}")
 
 
 async def stop_scheduler():
     if scheduler.running:
         scheduler.shutdown(wait=False)
+        logger.info("Scheduler stopped")

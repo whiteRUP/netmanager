@@ -3,11 +3,11 @@ import { api } from '../api.js'
 
 export default function Settings() {
   const [settings, setSettings] = useState(null)
-  const [scanForm, setScanForm] = useState({})
-  const [pwForm, setPwForm]     = useState({ current_password:'', new_password:'', confirm:'' })
-  const [nameForm, setNameForm] = useState({ app_name:'' })
-  const [msgs, setMsgs]         = useState({})
-  const [busy, setBusy]         = useState({})
+  const [scan,     setScan]     = useState({ scan_network: '', ping_interval: 60, full_scan_interval: 900 })
+  const [appName,  setAppName]  = useState('')
+  const [pwd,      setPwd]      = useState({ current_password: '', new_password: '', confirm: '' })
+  const [saving,   setSaving]   = useState({})
+  const [msg,      setMsg]      = useState({})
 
   useEffect(() => { load() }, [])
 
@@ -15,157 +15,178 @@ export default function Settings() {
     try {
       const s = await api.settings.get()
       setSettings(s)
-      setScanForm({ scan_network: s.scan_network, ping_interval: s.ping_interval,
-                    full_scan_interval: s.full_scan_interval })
-      setNameForm({ app_name: s.app_name })
+      setScan({
+        scan_network:       s.scan_network       || '192.168.1.0/24',
+        ping_interval:      s.ping_interval      || 60,
+        full_scan_interval: s.full_scan_interval || 900,
+      })
+      setAppName(s.app_name || 'NetManager')
     } catch {}
   }
 
-  function msg(key, text, isErr) {
-    setMsgs(m => ({ ...m, [key]: { text, err: isErr } }))
-    setTimeout(() => setMsgs(m => { const n = { ...m }; delete n[key]; return n }), 3000)
+  async function saveScan() {
+    setSaving(s => ({ ...s, scan: true })); setMsg(m => ({ ...m, scan: '' }))
+    try {
+      await api.settings.updateScan(scan)
+      setMsg(m => ({ ...m, scan: '✓ Saved' }))
+      setTimeout(() => setMsg(m => ({ ...m, scan: '' })), 3000)
+    } catch (e) {
+      setMsg(m => ({ ...m, scan: `✕ ${e.message}` }))
+    } finally { setSaving(s => ({ ...s, scan: false })) }
   }
 
-  async function saveScan() {
-    setBusy(b => ({ ...b, scan: true }))
+  async function saveAppName() {
+    setSaving(s => ({ ...s, name: true })); setMsg(m => ({ ...m, name: '' }))
     try {
-      await api.settings.updateScan({
-        scan_network:       scanForm.scan_network,
-        ping_interval:      Number(scanForm.ping_interval),
-        full_scan_interval: Number(scanForm.full_scan_interval),
-      })
-      msg('scan', 'Scan settings saved')
-    } catch (e) { msg('scan', e.message, true) }
-    setBusy(b => ({ ...b, scan: false }))
+      await api.settings.changeAppName({ app_name: appName })
+      setMsg(m => ({ ...m, name: '✓ Saved — reload to see in sidebar' }))
+      setTimeout(() => setMsg(m => ({ ...m, name: '' })), 4000)
+    } catch (e) {
+      setMsg(m => ({ ...m, name: `✕ ${e.message}` }))
+    } finally { setSaving(s => ({ ...s, name: false })) }
   }
 
   async function savePassword() {
-    if (pwForm.new_password !== pwForm.confirm)
-      return msg('pw', 'Passwords do not match', true)
-    setBusy(b => ({ ...b, pw: true }))
+    if (pwd.new_password !== pwd.confirm) {
+      return setMsg(m => ({ ...m, pwd: '✕ Passwords do not match' }))
+    }
+    if (pwd.new_password.length < 6) {
+      return setMsg(m => ({ ...m, pwd: '✕ Password must be at least 6 characters' }))
+    }
+    setSaving(s => ({ ...s, pwd: true })); setMsg(m => ({ ...m, pwd: '' }))
     try {
       await api.settings.changePassword({
-        current_password: pwForm.current_password,
-        new_password:     pwForm.new_password,
+        current_password: pwd.current_password,
+        new_password:     pwd.new_password,
       })
-      msg('pw', 'Password changed')
-      setPwForm({ current_password:'', new_password:'', confirm:'' })
-    } catch (e) { msg('pw', e.message, true) }
-    setBusy(b => ({ ...b, pw: false }))
+      setPwd({ current_password: '', new_password: '', confirm: '' })
+      setMsg(m => ({ ...m, pwd: '✓ Password changed' }))
+      setTimeout(() => setMsg(m => ({ ...m, pwd: '' })), 3000)
+    } catch (e) {
+      setMsg(m => ({ ...m, pwd: `✕ ${e.message}` }))
+    } finally { setSaving(s => ({ ...s, pwd: false })) }
   }
-
-  async function saveName() {
-    setBusy(b => ({ ...b, name: true }))
-    try {
-      await api.settings.changeAppName(nameForm)
-      msg('name', 'App name updated')
-      await load()
-    } catch (e) { msg('name', e.message, true) }
-    setBusy(b => ({ ...b, name: false }))
-  }
-
-  if (!settings) return <div style={{ color:'#64748b', padding:40, textAlign:'center' }}>Loading…</div>
 
   return (
-    <div style={{ maxWidth:640 }}>
-      <h1 style={{ fontSize:20, fontWeight:700, marginBottom:24 }}>Settings</h1>
+    <div className="fade-in" style={{ maxWidth: 680 }}>
+      <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 28 }}>Settings</h1>
 
-      <Card title="Scan settings">
-        <Field label="Network range (CIDR)">
-          <input value={scanForm.scan_network || ''} style={inp}
-                 onChange={e => setScanForm(f => ({ ...f, scan_network: e.target.value }))} />
-        </Field>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
-          <Field label="Ping interval (seconds)">
-            <input type="number" value={scanForm.ping_interval || ''} style={inp}
-                   onChange={e => setScanForm(f => ({ ...f, ping_interval: e.target.value }))} />
-          </Field>
-          <Field label="Full scan interval (seconds)">
-            <input type="number" value={scanForm.full_scan_interval || ''} style={inp}
-                   onChange={e => setScanForm(f => ({ ...f, full_scan_interval: e.target.value }))} />
-          </Field>
+      {/* App name */}
+      <Section title="App name" subtitle="Shown in the sidebar and browser tab.">
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>Display name</label>
+          <input className="input" value={appName} onChange={e => setAppName(e.target.value)} />
         </div>
-        <Msg msg={msgs.scan} />
-        <button style={btn} onClick={saveScan} disabled={busy.scan}>
-          {busy.scan ? 'Saving…' : 'Save scan settings'}
-        </button>
-      </Card>
+        <Row>
+          <button onClick={saveAppName} disabled={saving.name} className="btn btn-primary btn-sm">
+            {saving.name ? 'Saving…' : 'Save name'}
+          </button>
+          {msg.name && <FeedbackMsg text={msg.name} />}
+        </Row>
+      </Section>
 
-      <Card title="App name">
-        <Field label="Display name">
-          <input value={nameForm.app_name || ''} style={inp}
-                 onChange={e => setNameForm({ app_name: e.target.value })} />
-        </Field>
-        <Msg msg={msgs.name} />
-        <button style={btn} onClick={saveName} disabled={busy.name}>
-          {busy.name ? 'Saving…' : 'Save'}
-        </button>
-      </Card>
-
-      <Card title="Change password">
-        <Field label="Current password">
-          <input type="password" value={pwForm.current_password} style={inp}
-                 onChange={e => setPwForm(f => ({ ...f, current_password: e.target.value }))} />
-        </Field>
-        <Field label="New password">
-          <input type="password" value={pwForm.new_password} style={inp}
-                 onChange={e => setPwForm(f => ({ ...f, new_password: e.target.value }))} />
-        </Field>
-        <Field label="Confirm new password">
-          <input type="password" value={pwForm.confirm} style={inp}
-                 onChange={e => setPwForm(f => ({ ...f, confirm: e.target.value }))} />
-        </Field>
-        <Msg msg={msgs.pw} />
-        <button style={btn} onClick={savePassword} disabled={busy.pw}>
-          {busy.pw ? 'Saving…' : 'Change password'}
-        </button>
-      </Card>
-
-      <Card title="About">
-        <div style={{ fontSize:13, color:'#94a3b8', lineHeight:1.8 }}>
-          <div>Admin user: <strong style={{ color:'#f1f5f9' }}>{settings.admin_username}</strong></div>
-          <div>Backend port: <strong style={{ color:'#f1f5f9' }}>{settings.backend_port}</strong></div>
-          <div>API docs: <a href="/api/docs" target="_blank"
-                            style={{ color:'#38bdf8' }}>/api/docs</a></div>
+      {/* Scan settings */}
+      <Section title="Scan settings" subtitle="Configure network range and scan frequency.">
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>Network range</label>
+          <input className="input" value={scan.scan_network}
+            onChange={e => setScan(s => ({ ...s, scan_network: e.target.value }))}
+            placeholder="192.168.1.0/24 or 192.168.1.0/24, 10.0.0.0/24" />
+          <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 5 }}>
+            Comma-separate multiple CIDRs for multiple VLANs.
+          </div>
         </div>
-      </Card>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+          <div className="field">
+            <label>Ping interval (seconds)</label>
+            <input className="input" type="number" min={10} max={3600}
+              value={scan.ping_interval}
+              onChange={e => setScan(s => ({ ...s, ping_interval: +e.target.value }))} />
+          </div>
+          <div className="field">
+            <label>Full scan interval (seconds)</label>
+            <input className="input" type="number" min={60} max={86400}
+              value={scan.full_scan_interval}
+              onChange={e => setScan(s => ({ ...s, full_scan_interval: +e.target.value }))} />
+          </div>
+        </div>
+        <div style={{
+          background: 'rgba(59,130,246,.06)', border: '1px solid rgba(59,130,246,.15)',
+          borderRadius: 8, padding: '10px 14px', fontSize: 12, color: 'var(--text2)', marginBottom: 14, lineHeight: 1.7,
+        }}>
+          <strong style={{ color: 'var(--accent2)' }}>💡</strong>{' '}
+          Ping scan only checks online/offline. Full scan discovers new devices and updates ports — it's heavier on the network.
+          Suggested: ping every 60s, full scan every 900s (15 min).
+        </div>
+        <Row>
+          <button onClick={saveScan} disabled={saving.scan} className="btn btn-primary btn-sm">
+            {saving.scan ? 'Saving…' : 'Save scan settings'}
+          </button>
+          {msg.scan && <FeedbackMsg text={msg.scan} />}
+        </Row>
+      </Section>
+
+      {/* Password */}
+      <Section title="Change password" subtitle="Minimum 6 characters.">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 14 }}>
+          <div className="field">
+            <label>Current password</label>
+            <input className="input" type="password" value={pwd.current_password}
+              onChange={e => setPwd(p => ({ ...p, current_password: e.target.value }))} />
+          </div>
+          <div className="field">
+            <label>New password</label>
+            <input className="input" type="password" value={pwd.new_password}
+              onChange={e => setPwd(p => ({ ...p, new_password: e.target.value }))} />
+          </div>
+          <div className="field">
+            <label>Confirm new password</label>
+            <input className="input" type="password" value={pwd.confirm}
+              onChange={e => setPwd(p => ({ ...p, confirm: e.target.value }))} />
+          </div>
+        </div>
+        <Row>
+          <button onClick={savePassword} disabled={saving.pwd} className="btn btn-primary btn-sm">
+            {saving.pwd ? 'Changing…' : 'Change password'}
+          </button>
+          {msg.pwd && <FeedbackMsg text={msg.pwd} />}
+        </Row>
+      </Section>
+
+      {/* Info */}
+      <Section title="About" subtitle="">
+        <div style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.8 }}>
+          <div>NetManager v2.0 — self-hosted LAN device manager</div>
+          <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text3)' }}>
+            Data stored in SQLite · Config in integrations.json · Logs via Docker
+          </div>
+        </div>
+      </Section>
     </div>
   )
 }
 
-function Card({ title, children }) {
+function Section({ title, subtitle, children }) {
   return (
-    <div style={{ background:'#1e293b', border:'1px solid rgba(148,163,184,0.1)',
-                  borderRadius:12, padding:24, marginBottom:16 }}>
-      <div style={{ fontWeight:600, marginBottom:16, fontSize:15 }}>{title}</div>
+    <div className="card" style={{ marginBottom: 20 }}>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontWeight: 700, fontSize: 15 }}>{title}</div>
+        {subtitle && <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 3 }}>{subtitle}</div>}
+      </div>
       {children}
     </div>
   )
 }
 
-function Field({ label, children }) {
-  return (
-    <div style={{ marginBottom:14 }}>
-      <div style={{ fontSize:12, color:'#94a3b8', marginBottom:6 }}>{label}</div>
-      {children}
-    </div>
-  )
+function Row({ children }) {
+  return <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>{children}</div>
 }
 
-function Msg({ msg }) {
-  if (!msg) return null
+function FeedbackMsg({ text }) {
+  const ok = text.startsWith('✓')
   return (
-    <div style={{ padding:'8px 12px', borderRadius:8, marginBottom:12, fontSize:13,
-                  background: msg.err ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)',
-                  color: msg.err ? '#ef4444' : '#22c55e',
-                  border: `1px solid ${msg.err ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)'}` }}>
-      {msg.text}
-    </div>
+    <span style={{ fontSize: 12, color: ok ? 'var(--green)' : 'var(--red)', fontWeight: 500 }}>
+      {text}
+    </span>
   )
 }
-
-const inp = { width:'100%', padding:'8px 12px', background:'#0f172a',
-              border:'1px solid rgba(148,163,184,0.2)', borderRadius:8,
-              color:'#f1f5f9', fontSize:13 }
-const btn = { padding:'8px 20px', background:'#38bdf8', color:'#0f172a',
-              border:'none', borderRadius:8, fontWeight:600, fontSize:13, cursor:'pointer' }

@@ -5,82 +5,75 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
+from typing import Optional
 import bcrypt
 
 from database import get_session
 from models import AppConfig
-from config import settings
 
 router = APIRouter()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+ALGORITHM = "HS256"
+TOKEN_HOURS = 72
 
 
-def _verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode(), hashed.encode())
+async def _get_secret(session: AsyncSession) -> str:
+    r = await session.execute(select(AppConfig).where(AppConfig.key == "jwt_secret"))
+    row = r.scalar_one_or_none()
+    if not row:
+        raise HTTPException(503, "App not configured")
+    return row.value
 
 
-async def _get(key: str, session: AsyncSession) -> str:
-    result = await session.execute(select(AppConfig).where(AppConfig.key == key))
-    row = result.scalar_one_or_none()
-    return row.value if row else ""
-
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-    username: str
-
-
-def _make_token(username: str, secret: str, expire_hours: int = 24) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(hours=expire_hours)
-    return jwt.encode(
-        {"sub": username, "exp": expire},
-        secret,
-        algorithm=settings.jwt_algorithm
-    )
+def _make_token(username: str, secret: str, hours: int = TOKEN_HOURS) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=hours)
+    return jwt.encode({"sub": username, "exp": expire}, secret, algorithm=ALGORITHM)
 
 
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     session: AsyncSession = Depends(get_session)
 ) -> str:
-    secret = await _get("jwt_secret", session)
-    if not secret:
-        raise HTTPException(status_code=503, detail="App not configured")
+    credentials_error = HTTPException(401, "Invalid credentials", headers={"WWW-Authenticate": "Bearer"})
     try:
-        payload = jwt.decode(token, secret, algorithms=[settings.jwt_algorithm])
-        username = payload.get("sub")
+        secret = await _get_secret(session)
+        payload = jwt.decode(token, secret, algorithms=[ALGORITHM])
+        username: Optional[str] = payload.get("sub")
         if not username:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise credentials_error
         return username
     except JWTError:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
+        raise credentials_error
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login")
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: AsyncSession = Depends(get_session)
 ):
-    stored_username = await _get("admin_username", session)
-    stored_password = await _get("admin_password", session)
-    jwt_secret      = await _get("jwt_secret", session)
+    r = await session.execute(select(AppConfig).where(AppConfig.key == "admin_username"))
+    u_row = r.scalar_one_or_none()
+    r = await session.execute(select(AppConfig).where(AppConfig.key == "admin_password"))
+    p_row = r.scalar_one_or_none()
 
-    if not stored_username:
-        raise HTTPException(status_code=503, detail="Setup not completed")
+    if not u_row or not p_row:
+        raise HTTPException(503, "App not configured")
 
-    if form_data.username != stored_username or \
-       not _verify_password(form_data.password, stored_password):
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    if form_data.username != u_row.value:
+        raise HTTPException(401, "Invalid username or password")
 
-    token = _make_token(form_data.username, jwt_secret)
-    return {"access_token": token, "token_type": "bearer", "username": form_data.username}
+    if not bcrypt.checkpw(form_data.password.encode(), p_row.value.encode()):
+        raise HTTPException(401, "Invalid username or password")
+
+    secret = await _get_secret(session)
+    token = _make_token(form_data.username, secret)
+    return {"access_token": token, "token_type": "bearer"}
 
 
-@router.get("/me")
+class MeOut(BaseModel):
+    username: str
+
+@router.get("/me", response_model=MeOut)
 async def me(current_user: str = Depends(get_current_user)):
     return {"username": current_user}

@@ -4,12 +4,11 @@ from datetime import datetime, timezone
 from enum import Enum
 
 
-def utcnow():
-    """Return timezone-aware UTC datetime so JSON serialises with +00:00."""
+def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# ── App Config ────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────
 class AppConfig(SQLModel, table=True):
     key:        str      = Field(primary_key=True)
     value:      str
@@ -32,57 +31,61 @@ class IPType(str, Enum):
 
 
 class Device(SQLModel, table=True):
-    id:              Optional[int]   = Field(default=None, primary_key=True)
-    name:            str
-    ip:              str
-    mac:             str
-    hostname:        Optional[str]   = None
-    manufacturer:    Optional[str]   = None
-    device_type:     Optional[str]   = "Unknown"
-    icon:            Optional[str]   = "❓"
-    os:              Optional[str]   = None
-    location:        Optional[str]   = None
-    group_name:      Optional[str]   = "General"
-    vlan:            Optional[str]   = None
-    ip_type:         IPType          = IPType.unknown
-    status:          DeviceStatus    = DeviceStatus.unknown
-    verified:        bool            = False
-    notes:           Optional[str]   = None
-    open_ports:      Optional[str]   = None   # JSON: [80, 443]
-    mac_addresses:   Optional[str]   = None   # JSON: [{mac, tag}]
-    tailscale_ip:    Optional[str]   = None
-    first_seen:      datetime        = Field(default_factory=utcnow)
-    last_seen:       Optional[datetime] = None
-    last_changed:    Optional[datetime] = None
-    uptime_percent:  Optional[float] = None
-    response_time_ms:Optional[float] = None
+    id:               Optional[int]   = Field(default=None, primary_key=True)
+    name:             str
+    ip:               str
+    mac:              str             = "00:00:00:00:00:00"
+    hostname:         Optional[str]   = None
+    manufacturer:     Optional[str]   = None
+    device_type:      str             = "Unknown"
+    icon:             str             = "❓"
+    os:               Optional[str]   = None
+    location:         Optional[str]   = None
+    group_name:       str             = "General"
+    vlan:             Optional[str]   = None
+    ip_type:          IPType          = IPType.unknown
+    status:           DeviceStatus    = DeviceStatus.unknown
+    verified:         bool            = False
+    notes:            Optional[str]   = None
+    web_url:          Optional[str]   = None
+    open_ports:       Optional[str]   = None   # JSON [80,443]
+    mac_addresses:    Optional[str]   = None   # JSON [{mac,tag}]
+    tailscale_ip:     Optional[str]   = None
+    first_seen:       datetime        = Field(default_factory=utcnow)
+    last_seen:        Optional[datetime] = None
+    last_changed:     Optional[datetime] = None
+    uptime_percent:   Optional[float] = None
+    response_time_ms: Optional[float] = None
 
 
 class DeviceUpdate(SQLModel):
-    name:        Optional[str]    = None
-    device_type: Optional[str]    = None
-    icon:        Optional[str]    = None
-    manufacturer:Optional[str]    = None
-    os:          Optional[str]    = None
-    location:    Optional[str]    = None
-    group_name:  Optional[str]    = None
-    vlan:        Optional[str]    = None
-    ip_type:     Optional[IPType] = None
-    verified:    Optional[bool]   = None
-    notes:       Optional[str]    = None
+    name:         Optional[str]    = None
+    device_type:  Optional[str]    = None
+    icon:         Optional[str]    = None
+    manufacturer: Optional[str]    = None
+    os:           Optional[str]    = None
+    location:     Optional[str]    = None
+    group_name:   Optional[str]    = None
+    vlan:         Optional[str]    = None
+    ip_type:      Optional[IPType] = None
+    verified:     Optional[bool]   = None
+    notes:        Optional[str]    = None
+    web_url:      Optional[str]    = None
+    hostname:     Optional[str]    = None
 
 
-# ── Discovery ─────────────────────────────────────────────────────
+# ── Pending Device ────────────────────────────────────────────────
 class PendingDevice(SQLModel, table=True):
     id:            Optional[int] = Field(default=None, primary_key=True)
     ip:            str
-    mac:           str
-    manufacturer:  Optional[str] = None
+    mac:           str           = "00:00:00:00:00:00"
     hostname:      Optional[str] = None
-    open_ports:    Optional[str] = None
+    manufacturer:  Optional[str] = None
+    open_ports:    Optional[str] = None   # JSON [80,443]
     detected_type: Optional[str] = None
+    suggested_icon:Optional[str] = None
     confidence:    int           = 0
-    signals:       Optional[str] = None
+    signals:       Optional[str] = None   # JSON ["port","oui"]
     first_seen:    datetime      = Field(default_factory=utcnow)
     status:        str           = "pending"  # pending|approved|rejected
 
@@ -95,16 +98,16 @@ class ScanEvent(SQLModel, table=True):
     scan_type:     str                = "ping"
     devices_found: int                = 0
     new_devices:   int                = 0
-    status:        str                = "running"
+    status:        str                = "running"  # running|completed|error
     error:         Optional[str]      = None
 
 
 # ── Alerts ────────────────────────────────────────────────────────
 class Alert(SQLModel, table=True):
-    id:         Optional[int] = Field(default=None, primary_key=True)
-    created_at: datetime      = Field(default_factory=utcnow)
-    level:      str           = "info"   # info|warning|critical
-    title:      str
-    message:    str
-    device_id:  Optional[int] = None
-    read:       bool          = False
+    id:        Optional[int] = Field(default=None, primary_key=True)
+    created_at:datetime      = Field(default_factory=utcnow)
+    level:     str           = "info"   # info|warning|critical
+    title:     str
+    message:   str
+    device_id: Optional[int] = None
+    read:      bool          = False

@@ -1,23 +1,23 @@
 """
-NetManager scanner service
-  - nmap -sn ping sweep (respects CIDR, multi-CIDR)
-  - ARP cache fill for cross-subnet hosts
-  - Port scan for new hosts
-  - Rich device type identification:
-      port signatures → hostname patterns → OUI → TTL
+NetManager Scanner — two-phase discovery
+Phase 1: nmap -sn ping sweep → get IPs + MACs (from nmap output, never emitting mid-block)
+Phase 2: per-host port scan + fingerprinting → device type, confidence, signals
+
+All type names match deviceTypes.js exactly.
 """
-import asyncio
-import ipaddress
-import json
-import logging
-import subprocess
+import subprocess, ipaddress, json, logging
 from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── MAC parser singleton ──────────────────────────────────────────
+_last_scan: Optional[datetime] = None
 _mac_parser = None
+
+
+def last_scan_time() -> Optional[str]:
+    return _last_scan.isoformat() if _last_scan else None
+
 
 def _get_mac_parser():
     global _mac_parser
@@ -25,8 +25,8 @@ def _get_mac_parser():
         try:
             import manuf
             _mac_parser = manuf.MacParser()
-        except Exception as e:
-            logger.warning(f"manuf not available: {e}")
+        except Exception:
+            pass
     return _mac_parser
 
 
@@ -34,13 +34,13 @@ def _mac_vendor(mac: str) -> str:
     if not mac or mac == "00:00:00:00:00:00":
         return "Unknown"
     try:
-        parser = _get_mac_parser()
-        if parser:
-            result = parser.get_manuf(mac)
-            # Only return if it looks like a real vendor name (not a MAC prefix)
-            if result and len(result) > 2:
-                stripped = result.replace(":", "").replace("-", "")
-                if not all(c in "0123456789abcdefABCDEF" for c in stripped):
+        p = _get_mac_parser()
+        if p:
+            result = p.get_manuf(mac)
+            if result and len(result) > 3:
+                # Filter out results that are just hex strings (not real names)
+                clean = result.replace(":", "").replace("-", "")
+                if not all(c in "0123456789abcdefABCDEF" for c in clean):
                     return result
     except Exception:
         pass
@@ -48,10 +48,10 @@ def _mac_vendor(mac: str) -> str:
 
 
 def _arp_cache_mac(ip: str) -> str:
-    """Lookup MAC from kernel ARP/neighbour table — works for cross-subnet after a ping."""
+    """Read MAC from kernel ARP cache — works cross-subnet after pings."""
     try:
         r = subprocess.run(["ip", "neigh", "show", ip],
-                           capture_output=True, text=True, timeout=2)
+                           capture_output=True, text=True, timeout=3)
         for line in r.stdout.splitlines():
             if ip in line and "lladdr" in line:
                 parts = line.split()
@@ -63,102 +63,96 @@ def _arp_cache_mac(ip: str) -> str:
     return "00:00:00:00:00:00"
 
 
-# ── OUI → device type / icon ─────────────────────────────────────
-# Types MUST match deviceTypes.js DEVICE_TYPES exactly for icon lookup.
-# Format: {prefix_lower: (device_type, icon)}
-OUI_TYPE_MAP = {
-    # Apple — phones first, OUI could be iPhone/iPad/MacBook
-    "apple":            ("Apple Device",   "🍎"),
-    # Raspberry Pi Foundation
-    "raspberry":        ("Raspberry Pi",   "🫐"),
-    "raspberrypi":      ("Raspberry Pi",   "🫐"),
-    # Espressif (ESP8266, ESP32 — IoT modules)
-    "espressif":        ("IoT Device",     "💡"),
-    # Shelly / Allterco
-    "allterco":         ("IoT Device",     "💡"),
-    # Sonoff / ITEAD
-    "itead":            ("IoT Device",     "💡"),
-    # Tuya
-    "tuya":             ("IoT Device",     "💡"),
-    # TP-Link (routers + switches + Kasa plugs)
-    "tp-link":          ("Router",         "📡"),
-    "tp link":          ("Router",         "📡"),
-    # Ubiquiti
-    "ubiquiti":         ("Access Point",   "📶"),
-    "ubnt":             ("Access Point",   "📶"),
-    # MikroTik
-    "mikrotik":         ("MikroTik",       "⚡"),
-    # Cisco
-    "cisco":            ("Switch",         "🔀"),
-    # Netgear
-    "netgear":          ("Router",         "📡"),
-    # D-Link
-    "d-link":           ("Router",         "📡"),
-    # Asus
-    "asustek":          ("Router",         "📡"),
-    "asus":             ("Router",         "📡"),
-    # Samsung — could be phone, TV, appliance
-    "samsung":          ("Mobile/Phone",   "📱"),
-    # Xiaomi
-    "xiaomi":           ("Mobile/Phone",   "📱"),
-    # OnePlus
-    "oneplus":          ("Mobile/Phone",   "📱"),
-    # Synology
-    "synology":         ("NAS/Storage",    "💾"),
-    # QNAP
-    "qnap":             ("NAS/Storage",    "💾"),
-    # Western Digital (My Cloud NAS)
-    "western digital":  ("NAS/Storage",    "💾"),
-    # Intel (NUC / PC NIC)
-    "intel":            ("PC/Desktop",     "🖥️"),
-    # Dell
-    "dell":             ("PC/Desktop",     "🖥️"),
-    # HP
-    "hewlett":          ("PC/Desktop",     "🖥️"),
-    "hp":               ("PC/Desktop",     "🖥️"),
-    # Lenovo
-    "lenovo":           ("Laptop",         "💻"),
-    # VMware
-    "vmware":           ("Virtual Machine","🔲"),
-    # Proxmox / QEMU
-    "qemu":             ("Virtual Machine","🔲"),
-    # Hikvision / Dahua / Reolink — cameras
-    "hikvision":        ("IP Camera",      "📷"),
-    "dahua":            ("IP Camera",      "📷"),
-    "reolink":          ("IP Camera",      "📷"),
-    "amcrest":          ("IP Camera",      "📷"),
-    "foscam":           ("IP Camera",      "📷"),
-    # Amazon (Echo, Fire TV)
-    "amazon":           ("Smart Speaker",  "🔊"),
-    # Google (Nest, Chromecast, Google Home)
-    "google":           ("Smart Speaker",  "🔊"),
-    # Nintendo
-    "nintendo":         ("Game Console",   "🎮"),
-    # Sony (PS4/PS5)
-    "sony":             ("Game Console",   "🎮"),
-    # Microsoft (Xbox, Surface)
-    "microsoft":        ("PC/Desktop",     "🖥️"),
-    # Roku
-    "roku":             ("Smart TV",       "📺"),
-    # LG Electronics (TVs)
-    "lg electronics":   ("Smart TV",       "📺"),
-    # Brother / Canon / Epson
-    "brother":          ("Printer",        "🖨️"),
-    "canon":            ("Printer",        "🖨️"),
-    "epson":            ("Printer",        "🖨️"),
-    "seiko":            ("Printer",        "🖨️"),
-    # APC / Eaton (UPS)
-    "american power":   ("Network UPS",   "🔋"),
-    "eaton":            ("Network UPS",   "🔋"),
-    "cyberpower":       ("Network UPS",   "🔋"),
-    # ZimaBoard / SBC
-    "icewhale":         ("Server",         "🖧"),
+# ── Type registry (must match deviceTypes.js) ─────────────────────
+
+# Port sets — any match triggers this type
+PORT_SETS: dict = {
+    "Home Assistant": {8123},
+    "IoT Device":     {1883, 8883, 1880},
+    "IP Camera":      {554, 8554},
+    "Media Server":   {32400, 8096, 8920, 7359},
+    "NAS/Storage":    {5000, 5001},
+    "Printer":        {9100, 631},
+    "DNS Server":     {53},
+    "VPN Server":     {51820, 1194},
 }
 
-# ── Hostname patterns → (type, icon) ────────────────────────────
-# Types MUST match deviceTypes.js DEVICE_TYPES exactly.
-HOSTNAME_PATTERNS = [
-    # IoT / smart home
+# Single-port → (type, icon)
+PORT_TYPE_MAP: dict = {
+    8123:  ("Home Assistant", "🏠"),
+    1883:  ("IoT Device",     "💡"),
+    8883:  ("IoT Device",     "💡"),
+    1880:  ("IoT Device",     "💡"),
+    554:   ("IP Camera",      "📷"),
+    8554:  ("IP Camera",      "📷"),
+    32400: ("Media Server",   "🎬"),
+    8096:  ("Media Server",   "🎬"),
+    8920:  ("Media Server",   "🎬"),
+    7359:  ("Media Server",   "🎬"),
+    5000:  ("NAS/Storage",    "💾"),
+    5001:  ("NAS/Storage",    "💾"),
+    9100:  ("Printer",        "🖨️"),
+    631:   ("Printer",        "🖨️"),
+    53:    ("DNS Server",     "🌐"),
+    51820: ("VPN Server",     "🔐"),
+    1194:  ("VPN Server",     "🔐"),
+    9000:  ("Virtual Machine","🔲"),
+    9443:  ("Virtual Machine","🔲"),
+    3389:  ("PC/Desktop",     "🖥️"),
+    5900:  ("PC/Desktop",     "🖥️"),
+    4200:  ("Router",         "📡"),
+    161:   ("Router",         "📡"),
+}
+
+# OUI prefix → (type, icon)
+OUI_TYPE_MAP: dict = {
+    "apple":           ("Apple Device",   "🍎"),
+    "raspberry":       ("Raspberry Pi",   "🫐"),
+    "raspberrypi":     ("Raspberry Pi",   "🫐"),
+    "espressif":       ("IoT Device",     "💡"),
+    "allterco":        ("IoT Device",     "💡"),   # Shelly
+    "itead":           ("IoT Device",     "💡"),   # Sonoff
+    "tuya":            ("IoT Device",     "💡"),
+    "tp-link":         ("Router",         "📡"),
+    "ubiquiti":        ("Access Point",   "📶"),
+    "ubnt":            ("Access Point",   "📶"),
+    "mikrotik":        ("MikroTik",       "⚡"),
+    "cisco":           ("Switch",         "🔀"),
+    "netgear":         ("Router",         "📡"),
+    "d-link":          ("Router",         "📡"),
+    "asustek":         ("Router",         "📡"),
+    "samsung":         ("Mobile/Phone",   "📱"),
+    "xiaomi":          ("Mobile/Phone",   "📱"),
+    "synology":        ("NAS/Storage",    "💾"),
+    "qnap":            ("NAS/Storage",    "💾"),
+    "western digital": ("NAS/Storage",    "💾"),
+    "intel":           ("PC/Desktop",     "🖥️"),
+    "dell":            ("PC/Desktop",     "🖥️"),
+    "hewlett":         ("PC/Desktop",     "🖥️"),
+    "lenovo":          ("Laptop",         "💻"),
+    "vmware":          ("Virtual Machine","🔲"),
+    "qemu":            ("Virtual Machine","🔲"),
+    "hikvision":       ("IP Camera",      "📷"),
+    "dahua":           ("IP Camera",      "📷"),
+    "reolink":         ("IP Camera",      "📷"),
+    "amazon":          ("Smart Speaker",  "🔊"),
+    "google":          ("Smart Speaker",  "🔊"),
+    "nintendo":        ("Game Console",   "🎮"),
+    "sony":            ("Game Console",   "🎮"),
+    "microsoft":       ("PC/Desktop",     "🖥️"),
+    "roku":            ("Smart TV",       "📺"),
+    "lg electronics":  ("Smart TV",       "📺"),
+    "brother":         ("Printer",        "🖨️"),
+    "canon":           ("Printer",        "🖨️"),
+    "epson":           ("Printer",        "🖨️"),
+    "american power":  ("Network UPS",    "🔋"),
+    "eaton":           ("Network UPS",    "🔋"),
+    "cyberpower":      ("Network UPS",    "🔋"),
+    "icewhale":        ("Server",         "🖧"),
+}
+
+# Hostname keyword → (type, icon)
+HOSTNAME_PATTERNS: list = [
     ("esp",           "IoT Device",     "💡"),
     ("shelly",        "IoT Device",     "💡"),
     ("sonoff",        "IoT Device",     "💡"),
@@ -166,28 +160,19 @@ HOSTNAME_PATTERNS = [
     ("tuya",          "IoT Device",     "💡"),
     ("wemos",         "IoT Device",     "💡"),
     ("nodemcu",       "IoT Device",     "💡"),
-    ("zigbee",        "IoT Device",     "💡"),
-    ("zwavejs",       "IoT Device",     "💡"),
-    # Smart plug
-    ("kasa",          "Smart Plug",     "🔌"),
-    ("meross",        "Smart Plug",     "🔌"),
-    # Raspberry Pi
     ("raspberrypi",   "Raspberry Pi",   "🫐"),
     ("raspi",         "Raspberry Pi",   "🫐"),
     ("rpi",           "Raspberry Pi",   "🫐"),
-    # Cameras
     ("camera",        "IP Camera",      "📷"),
     ("ipcam",         "IP Camera",      "📷"),
-    ("dvr",           "IP Camera",      "📷"),
-    ("nvr",           "IP Camera",      "📷"),
     ("hikvision",     "IP Camera",      "📷"),
     ("dahua",         "IP Camera",      "📷"),
     ("reolink",       "IP Camera",      "📷"),
-    # Printers
+    ("dvr",           "IP Camera",      "📷"),
+    ("nvr",           "IP Camera",      "📷"),
     ("printer",       "Printer",        "🖨️"),
     ("brother",       "Printer",        "🖨️"),
     ("epson",         "Printer",        "🖨️"),
-    # Network
     ("router",        "Router",         "📡"),
     ("gateway",       "Router",         "📡"),
     ("openwrt",       "Router",         "📡"),
@@ -198,7 +183,6 @@ HOSTNAME_PATTERNS = [
     ("ubnt",          "Access Point",   "📶"),
     ("unifi",         "Access Point",   "📶"),
     ("switch",        "Switch",         "🔀"),
-    # Servers / NAS
     ("nas",           "NAS/Storage",    "💾"),
     ("synology",      "NAS/Storage",    "💾"),
     ("diskstation",   "NAS/Storage",    "💾"),
@@ -206,447 +190,388 @@ HOSTNAME_PATTERNS = [
     ("truenas",       "NAS/Storage",    "💾"),
     ("server",        "Server",         "🖧"),
     ("proxmox",       "Server",         "🖧"),
-    # Mobile
     ("iphone",        "Mobile/Phone",   "📱"),
     ("ipad",          "Tablet",         "📲"),
     ("android",       "Mobile/Phone",   "📱"),
     ("pixel",         "Mobile/Phone",   "📱"),
     ("galaxy",        "Mobile/Phone",   "📱"),
-    ("oneplus",       "Mobile/Phone",   "📱"),
-    # Smart home
     ("homeassistant", "Home Assistant", "🏠"),
     ("hassio",        "Home Assistant", "🏠"),
     ("hass",          "Home Assistant", "🏠"),
-    # Media
     ("plex",          "Media Server",   "🎬"),
     ("jellyfin",      "Media Server",   "🎬"),
     ("emby",          "Media Server",   "🎬"),
     ("chromecast",    "Smart TV",       "📺"),
     ("firetv",        "Smart TV",       "📺"),
-    # Smart speakers
     ("echo",          "Smart Speaker",  "🔊"),
     ("alexa",         "Smart Speaker",  "🔊"),
-    ("google-home",   "Smart Speaker",  "🔊"),
-    # Gaming
     ("playstation",   "Game Console",   "🎮"),
-    ("ps4",           "Game Console",   "🎮"),
-    ("ps5",           "Game Console",   "🎮"),
     ("xbox",          "Game Console",   "🎮"),
     ("nintendo",      "Game Console",   "🎮"),
-    # PCs
     ("desktop",       "PC/Desktop",     "🖥️"),
     ("laptop",        "Laptop",         "💻"),
-    ("workstation",   "PC/Desktop",     "🖥️"),
     ("macbook",       "Laptop",         "💻"),
     ("imac",          "PC/Desktop",     "🖥️"),
 ]
 
-# ── Port signatures → (type, icon) ──────────────────────────────
-# Types MUST match deviceTypes.js DEVICE_TYPES exactly.
-PORT_TYPE_MAP = {
-    # IoT / MQTT
-    1883:  ("IoT Device",     "💡"),
-    8883:  ("IoT Device",     "💡"),
-    # Home Assistant
-    8123:  ("Home Assistant", "🏠"),
-    # Portainer / Docker
-    9000:  ("Virtual Machine","🔲"),
-    9443:  ("Virtual Machine","🔲"),
-    # Cameras — RTSP
-    554:   ("IP Camera",      "📷"),
-    8554:  ("IP Camera",      "📷"),
-    # Printers
-    9100:  ("Printer",        "🖨️"),
-    631:   ("Printer",        "🖨️"),
-    # NAS — Synology DSM
-    5000:  ("NAS/Storage",    "💾"),
-    5001:  ("NAS/Storage",    "💾"),
-    # Network management — SNMP
-    161:   ("Router",         "📡"),
-    # Remote desktop
-    3389:  ("PC/Desktop",     "🖥️"),
-    5900:  ("PC/Desktop",     "🖥️"),
-    # Media servers
-    32400: ("Media Server",   "🎬"),
-    8096:  ("Media Server",   "🎬"),
-    8920:  ("Media Server",   "🎬"),
-    7359:  ("Media Server",   "🎬"),
-    # Plex/Emby/Kodi discovery
-    1900:  ("Media Server",   "🎬"),
-    # DNS
-    53:    ("DNS Server",     "🌐"),
-    # Router management panels
-    4200:  ("Router",         "📡"),
-    # Node-RED
-    1880:  ("IoT Device",     "💡"),
-    # WireGuard / VPN
-    51820: ("VPN Server",     "🔐"),
-}
 
-# Port sets (any match triggers this type)
-PORT_SETS = {
-    "IoT Device":     {1883, 8883, 1880},
-    "Home Assistant": {8123},
-    "IP Camera":      {554, 8554},
-    "Printer":        {9100, 631},
-    "Media Server":   {32400, 8096, 8920, 7359},
-    "NAS/Storage":    {5000, 5001},
-    "DNS Server":     {53},
-    "VPN Server":     {51820, 1194},
-}
-
-
-def _detect_type(ports: list, hostname: str, manufacturer: str, ttl: Optional[int] = None) -> tuple:
+def _detect_type(ports: list, hostname: str, manufacturer: str) -> tuple:
     """
-    Return (device_type, icon, confidence_signals) tuple.
-    Uses 4 signals with priority: ports > hostname > OUI/manufacturer > TTL.
+    Returns (device_type, icon, confidence, signals_list).
+    Priority: port set > specific port > hostname > OUI > fallback.
     """
-    hostname_lower = (hostname or "").lower().replace(".local", "").replace(".lan", "")
-    mfr_lower      = (manufacturer or "").lower()
+    host = (hostname or "").lower().replace(".local", "").replace(".lan", "")
+    mfr  = (manufacturer or "").lower()
     signals = []
 
-    # 1. Port-based detection (strongest signal)
+    # 1. Port set — highest confidence
     for type_name, port_set in PORT_SETS.items():
         if any(p in ports for p in port_set):
-            icon = next((v[1] for k, v in PORT_TYPE_MAP.items() if v[0] == type_name), "💡")
-            signals.append(("port", type_name, icon))
+            icon = next((v[1] for k, v in PORT_TYPE_MAP.items()
+                         if v[0] == type_name and k in port_set), "💡")
+            signals.append(("port_set", type_name, icon))
             break
-    # Specific port priority (ordered by confidence)
+
+    # 2. Specific single-port priority
     for port in [8123, 32400, 8096, 554, 8554, 1883, 9100, 51820, 53, 3389]:
         if port in ports and port in PORT_TYPE_MAP:
             dt, ic = PORT_TYPE_MAP[port]
-            if not any(s[1] == dt for s in signals):
+            if not signals or signals[0][1] != dt:
                 signals.append(("port", dt, ic))
+                break
 
-    # 2. Hostname pattern match
+    # 3. Hostname patterns
     for pattern, dtype, dicon in HOSTNAME_PATTERNS:
-        if pattern in hostname_lower:
+        if pattern in host:
             signals.append(("hostname", dtype, dicon))
             break
 
-    # 3. OUI / manufacturer match
+    # 4. OUI / manufacturer
     for prefix, (dtype, dicon) in OUI_TYPE_MAP.items():
-        if prefix in mfr_lower:
+        if prefix in mfr:
             signals.append(("oui", dtype, dicon))
             break
 
-    # 4. TTL-based OS guess (lowest confidence)
-    if ttl:
-        if 60 <= ttl <= 70:
-            signals.append(("ttl", "Linux Device",   "🐧"))
-        elif 120 <= ttl <= 135:
-            signals.append(("ttl", "Windows Device", "🪟"))
-        elif 250 <= ttl <= 255:
-            signals.append(("ttl", "Apple / Cisco",  "🍎"))
+    if not signals:
+        return "Unknown", "❓", 20, []
 
-    # Pick winner: first signal wins (priority: port → hostname → oui → ttl)
-    if signals:
-        _, dtype, dicon = signals[0]
-        return dtype, dicon, [s[0] for s in signals]
-    return "Unknown", "❓", []
+    _, dtype, dicon = signals[0]
+    signal_types = [s[0] for s in signals]
+
+    # Confidence: more agreeing signals = higher confidence
+    base = {"port_set": 85, "port": 75, "hostname": 65, "oui": 55}.get(signals[0][0], 30)
+    # Bonus for multiple agreeing signals
+    agreeing = sum(1 for s in signals[1:] if s[1] == dtype)
+    conf = min(99, base + agreeing * 10)
+
+    return dtype, dicon, conf, signal_types
 
 
-# ── nmap sweep ───────────────────────────────────────────────────
+# ── nmap sweep ────────────────────────────────────────────────────
 
 def _nmap_ping_sweep(network: str) -> list:
     """
-    nmap -sn sweep across all configured CIDRs.
-    Supports comma-separated: "192.168.1.0/24, 10.0.0.0/24"
-
-    nmap output order per host:
-        Nmap scan report for <hostname> (<ip>)    ← OR just <ip>
-        Host is up (Xs latency).
-        MAC Address: AA:BB:CC:DD:EE:FF (Vendor)   ← AFTER "Host is up"
-
-    We accumulate a full host block then emit on next "scan report" line.
+    nmap -sn sweep. Supports comma-separated CIDRs.
+    CRITICAL: nmap outputs MAC AFTER 'Host is up', so we accumulate
+    a full host block and only emit on the next 'Nmap scan report' line.
     """
-    try:
-        targets  = [n.strip() for n in network.split(",") if n.strip()]
-        results  = []
-        seen_ips = set()
+    targets = [n.strip() for n in network.split(",") if n.strip()]
+    results, seen_ips = [], set()
 
-        for target in targets:
-            # Skip oversized ranges (>4096 hosts) for ping scan
-            try:
-                net = ipaddress.ip_network(target, strict=False)
-                if net.num_addresses > 4096:
-                    logger.warning(f"Skipping {target} (>{net.num_addresses} addresses) for ping scan")
-                    continue
-            except ValueError:
-                pass
+    for target in targets:
+        try:
+            net = ipaddress.ip_network(target, strict=False)
+            if net.num_addresses > 4096:
+                logger.warning(f"Skipping {target} — too large for ping scan (>{net.num_addresses} hosts)")
+                continue
+        except ValueError:
+            logger.warning(f"Invalid network: {target}")
+            continue
 
-            logger.info(f"nmap sweep: {target}")
+        logger.info(f"nmap sweep: {target}")
+        try:
             r = subprocess.run(
                 ["nmap", "-sn", "-T4", "--host-timeout", "3s", target],
                 capture_output=True, text=True, timeout=300
             )
+        except subprocess.TimeoutExpired:
+            logger.error(f"nmap sweep timed out: {target}")
+            continue
+        except Exception as e:
+            logger.error(f"nmap sweep error: {e}")
+            continue
 
-            current_ip  = None
-            current_mac = "00:00:00:00:00:00"
-            current_host = None
-            is_up       = False
+        # Parse — accumulate per-host block before emitting
+        current_ip  = None
+        current_mac = "00:00:00:00:00:00"
+        is_up       = False
 
-            def _emit():
-                if current_ip and is_up and current_ip not in seen_ips:
-                    seen_ips.add(current_ip)
-                    mac = current_mac
-                    # Try ARP cache if nmap gave us nothing (cross-subnet)
-                    if mac == "00:00:00:00:00:00":
-                        mac = _arp_cache_mac(current_ip)
-                    results.append({
-                        "ip":       current_ip,
-                        "mac":      mac,
-                        "hostname": current_host,
-                    })
+        def _emit():
+            if current_ip and is_up and current_ip not in seen_ips:
+                seen_ips.add(current_ip)
+                results.append({"ip": current_ip, "mac": current_mac})
 
-            for line in r.stdout.splitlines():
-                line = line.strip()
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Nmap scan report for"):
+                _emit()  # flush previous block
+                parts = line.split()
+                raw = parts[-1].strip("()")
+                try:
+                    ipaddress.ip_address(raw)
+                    current_ip = raw
+                except ValueError:
+                    current_ip = None
+                current_mac = "00:00:00:00:00:00"
+                is_up = False
 
-                if line.startswith("Nmap scan report for"):
-                    _emit()  # flush previous host block
-                    # Parse: "Nmap scan report for hostname (1.2.3.4)" or "... for 1.2.3.4"
-                    parts = line.split()
-                    raw = parts[-1].strip("()")
-                    try:
-                        ipaddress.ip_address(raw)
-                        current_ip = raw
-                        # Hostname may be before the parens
-                        if "(" in line:
-                            current_host = line.split("for ")[1].split(" (")[0]
-                        else:
-                            current_host = None
-                    except ValueError:
-                        current_ip = None
-                        current_host = None
-                    current_mac = "00:00:00:00:00:00"
-                    is_up = False
+            elif line.startswith("Host is up"):
+                is_up = True
 
-                elif line.startswith("Host is up"):
-                    is_up = True
+            elif "MAC Address:" in line and current_ip:
+                # "MAC Address: AA:BB:CC:DD:EE:FF (Vendor Name)"
+                mac_part = line.split("MAC Address:")[1].strip()
+                current_mac = mac_part.split()[0].lower()
 
-                elif "MAC Address:" in line and current_ip:
-                    # "MAC Address: AA:BB:CC:DD:EE:FF (Vendor Name)"
-                    mac_part    = line.split("MAC Address:")[1].strip()
-                    current_mac = mac_part.split()[0].lower()
+        _emit()  # flush last block
 
-            _emit()  # flush final block
+    logger.info(f"nmap sweep found {len(results)} hosts")
 
-        logger.info(f"nmap sweep complete: {len(results)} hosts")
-        return results
+    # ARP cache fallback for missing MACs (cross-subnet hosts)
+    for host in results:
+        if host["mac"] == "00:00:00:00:00:00":
+            cached = _arp_cache_mac(host["ip"])
+            if cached != "00:00:00:00:00:00":
+                host["mac"] = cached
+                logger.debug(f"ARP cache MAC for {host['ip']}: {cached}")
 
-    except subprocess.TimeoutExpired:
-        logger.error("nmap sweep timed out")
-        return []
-    except Exception as e:
-        logger.error(f"nmap sweep error: {e}")
-        return []
+    return results
 
 
-def _port_scan(ip: str) -> tuple:
-    """
-    nmap port scan. Returns (open_ports: list[int], ttl: int|None).
-    Scans common service ports relevant to homelab devices.
-    """
-    port_list = (
-        "21,22,23,25,53,80,110,143,161,443,445,554,"
-        "631,1883,3389,4200,5000,5001,5900,7359,"
-        "8080,8096,8123,8443,8554,8883,8920,9000,"
-        "9100,9443,32400"
-    )
+def _nmap_port_scan(ip: str, hostname: str = "") -> dict:
+    """Port scan a single host. Returns {ports, os_hint, hostname}."""
     try:
         r = subprocess.run(
-            ["nmap", "-p", port_list, "-T4", "--host-timeout", "5s", "-oG", "-", ip],
+            ["nmap", "-sV", "-T4", "--host-timeout", "10s",
+             "-p", "21,22,23,25,53,80,110,143,161,443,445,554,631,"
+                   "1883,1880,3389,5000,5001,5900,7359,8080,8096,8123,"
+                   "8443,8554,8883,8920,9000,9100,9443,32400,51820",
+             ip],
             capture_output=True, text=True, timeout=60
         )
         ports = []
-        ttl   = None
+        found_hostname = hostname
         for line in r.stdout.splitlines():
-            if "Ports:" in line:
-                # grepable format: "Ports: 22/open/tcp//ssh///, 80/open/tcp//http///"
-                for seg in line.split("Ports:")[1].split(","):
-                    seg = seg.strip()
-                    if "/open/" in seg:
-                        try:
-                            ports.append(int(seg.split("/")[0]))
-                        except ValueError:
-                            pass
-            if "ttl" in line.lower():
-                # Not in grepable format; try normal output
-                pass
-        return ports, ttl
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Port scan timed out for {ip}")
-        return [], None
+            line = line.strip()
+            if "/tcp" in line and "open" in line:
+                try:
+                    port = int(line.split("/")[0])
+                    ports.append(port)
+                except ValueError:
+                    pass
+            if line.startswith("Nmap scan report for") and "(" in line:
+                found_hostname = line.split("for")[1].split("(")[0].strip()
+        return {"ports": ports, "hostname": found_hostname}
     except Exception as e:
-        logger.error(f"Port scan error for {ip}: {e}")
-        return [], None
+        logger.warning(f"Port scan failed for {ip}: {e}")
+        return {"ports": [], "hostname": hostname}
 
 
-# ── Main scan functions ──────────────────────────────────────────
+# ── Main scan functions ────────────────────────────────────────────
 
 async def ping_scan():
-    """Quick sweep — update online/offline for known devices, don't add new ones."""
+    """Quick ping sweep — updates online/offline for known devices only."""
+    global _last_scan
     from database import AsyncSessionLocal
-    from models import Device, DeviceStatus, ScanEvent
+    from models import Device, ScanEvent, DeviceStatus
     from sqlmodel import select
-    from services.ws_manager import ws_manager
+    from services.ws_manager import manager
 
-    now = datetime.now(timezone.utc)
-    event = ScanEvent(scan_type="ping", started_at=now)
-
-    async with AsyncSessionLocal() as session:
-        r_cfg = await session.execute(
-            __import__("sqlmodel", fromlist=["select"]).select(
-                __import__("models", fromlist=["AppConfig"]).AppConfig
-            ).where(
-                __import__("models", fromlist=["AppConfig"]).AppConfig.key == "scan_network"
-            )
-        )
-        cfg = r_cfg.scalar_one_or_none()
-        network = cfg.value if cfg else "192.168.1.0/24"
-
-        session.add(event)
-        await session.commit()
-        await session.refresh(event)
-
-    logger.info(f"Ping scan starting — network: {network}")
-    hosts = await asyncio.get_event_loop().run_in_executor(
-        None, _nmap_ping_sweep, network)
-
-    live_ips = {h["ip"] for h in hosts}
+    logger.info("Starting ping scan")
 
     async with AsyncSessionLocal() as session:
-        result  = await session.execute(select(Device))
-        devices = result.scalars().all()
-        changed = 0
-
-        for d in devices:
-            new_status = DeviceStatus.online if d.ip in live_ips else DeviceStatus.offline
-            if d.status != new_status:
-                d.status    = new_status
-                d.last_changed = datetime.now(timezone.utc)
-                changed += 1
-            if d.ip in live_ips:
-                d.last_seen = datetime.now(timezone.utc)
-
-        event.completed_at  = datetime.now(timezone.utc)
-        event.devices_found = len(hosts)
-        event.status        = "completed"
-        session.add(event)
+        scan = ScanEvent(scan_type="ping")
+        session.add(scan)
         await session.commit()
+        await session.refresh(scan)
 
-    logger.info(f"Ping scan done — {len(hosts)} live, {changed} status changes")
-    await ws_manager.broadcast({"type": "scan_complete", "scan_type": "ping",
-                                "devices_found": len(hosts)})
+        try:
+            r = await session.execute(select(Device))
+            known_devices = r.scalars().all()
+
+            r2 = await session.execute(
+                select(from_statement := __import__("sqlmodel").select(
+                    __import__("models").AppConfig
+                ).where(__import__("models").AppConfig.key == "scan_network")))
+            network = "192.168.1.0/24"
+            try:
+                from models import AppConfig
+                r_net = await session.execute(
+                    select(AppConfig).where(AppConfig.key == "scan_network"))
+                net_row = r_net.scalar_one_or_none()
+                if net_row:
+                    network = net_row.value
+            except Exception:
+                pass
+
+            sweep = _nmap_ping_sweep(network)
+            live_ips = {h["ip"] for h in sweep}
+            now = datetime.now(timezone.utc)
+
+            changed = 0
+            for d in known_devices:
+                new_status = DeviceStatus.online if d.ip in live_ips else DeviceStatus.offline
+                if d.status != new_status:
+                    d.status = new_status
+                    d.last_changed = now
+                    changed += 1
+                if d.ip in live_ips:
+                    d.last_seen = now
+                session.add(d)
+
+            scan.status        = "completed"
+            scan.completed_at  = now
+            scan.devices_found = len(live_ips)
+            session.add(scan)
+            await session.commit()
+            _last_scan = now
+
+            logger.info(f"Ping scan done — {len(live_ips)} online, {changed} status changes")
+            await manager.broadcast({"event": "scan_complete", "type": "ping",
+                                     "online": len(live_ips), "changed": changed})
+
+        except Exception as e:
+            logger.error(f"Ping scan error: {e}")
+            scan.status = "error"
+            scan.error  = str(e)
+            scan.completed_at = datetime.now(timezone.utc)
+            session.add(scan)
+            await session.commit()
 
 
 async def full_scan():
-    """Deep scan — discover new devices with port scan + type detection."""
+    """Full nmap sweep + port scan + fingerprint + add new to pending queue."""
+    global _last_scan
     from database import AsyncSessionLocal
-    from models import Device, DeviceStatus, PendingDevice, ScanEvent, Alert, AppConfig
+    from models import Device, PendingDevice, ScanEvent, DeviceStatus, Alert, AppConfig
     from sqlmodel import select
-    from services.ws_manager import ws_manager
+    from services.ws_manager import manager
 
-    now = datetime.now(timezone.utc)
-    event = ScanEvent(scan_type="full", started_at=now)
+    logger.info("Starting full scan")
 
     async with AsyncSessionLocal() as session:
-        r_cfg = await session.execute(
-            select(AppConfig).where(AppConfig.key == "scan_network"))
-        cfg     = r_cfg.scalar_one_or_none()
-        network = cfg.value if cfg else "192.168.1.0/24"
-
-        session.add(event)
+        scan = ScanEvent(scan_type="full")
+        session.add(scan)
         await session.commit()
-        await session.refresh(event)
+        await session.refresh(scan)
 
-    logger.info(f"Full scan starting — network: {network}")
-    hosts = await asyncio.get_event_loop().run_in_executor(
-        None, _nmap_ping_sweep, network)
+        try:
+            r_net = await session.execute(
+                select(AppConfig).where(AppConfig.key == "scan_network"))
+            net_row = r_net.scalar_one_or_none()
+            network = net_row.value if net_row else "192.168.1.0/24"
 
-    live_ips = {h["ip"] for h in hosts}
-    new_count = 0
+            sweep = _nmap_ping_sweep(network)
+            now = datetime.now(timezone.utc)
 
-    async with AsyncSessionLocal() as session:
-        result   = await session.execute(select(Device))
-        existing = {d.ip: d for d in result.scalars().all()}
-        pending_r = await session.execute(select(PendingDevice))
-        pending_ips = {p.ip for p in pending_r.scalars().all()
-                       if p.status == "pending"}
+            r = await session.execute(select(Device))
+            known = {d.ip: d for d in r.scalars().all()}
 
-        for host in hosts:
-            ip  = host["ip"]
-            mac = host["mac"]
-            mfr = _mac_vendor(mac)
+            r2 = await session.execute(select(PendingDevice))
+            pending_ips = {p.ip for p in r2.scalars().all()
+                           if p.status == "pending"}
 
-            # Update known device
-            if ip in existing:
-                d = existing[ip]
-                d.status   = DeviceStatus.online
-                d.last_seen = datetime.now(timezone.utc)
-                if mac != "00:00:00:00:00:00" and d.mac == "00:00:00:00:00:00":
-                    d.mac = mac
-                if mfr != "Unknown" and (not d.manufacturer or d.manufacturer == "Unknown"):
-                    d.manufacturer = mfr
-                continue
+            new_count = 0
+            live_ips  = set()
 
-            # Skip already-pending
-            if ip in pending_ips:
-                continue
+            for host in sweep:
+                ip  = host["ip"]
+                mac = host["mac"]
+                live_ips.add(ip)
 
-            # Port scan new host (run in executor to keep async)
-            ports, ttl = await asyncio.get_event_loop().run_in_executor(
-                None, _port_scan, ip)
+                mfr = _mac_vendor(mac)
 
-            hostname = host.get("hostname")
-            dtype, dicon, signals = _detect_type(ports, hostname or "", mfr, ttl)
+                # Port scan
+                scan_result = _nmap_port_scan(ip)
+                ports    = scan_result["ports"]
+                hostname = scan_result["hostname"]
 
-            # Confidence scoring
-            conf = 30  # base
-            if mac != "00:00:00:00:00:00":
-                conf += 15
-            if mfr != "Unknown":
-                conf += 10
-            if hostname:
-                conf += 10
-            if ports:
-                conf += 15
-            if dtype != "Unknown":
-                conf += 20
+                dtype, dicon, confidence, signals = _detect_type(ports, hostname, mfr)
 
-            pending = PendingDevice(
-                ip           = ip,
-                mac          = mac,
-                manufacturer = mfr if mfr != "Unknown" else None,
-                hostname     = hostname,
-                open_ports   = json.dumps(ports) if ports else None,
-                detected_type = dtype,
-                confidence   = min(conf, 99),
-                signals      = json.dumps(signals),
-            )
-            session.add(pending)
-            new_count += 1
+                if ip in known:
+                    # Update existing device
+                    d = known[ip]
+                    if d.status != DeviceStatus.online:
+                        d.status = DeviceStatus.online
+                        d.last_changed = now
+                    d.last_seen = now
+                    if mac != "00:00:00:00:00:00" and (not d.mac or d.mac == "00:00:00:00:00:00"):
+                        d.mac = mac
+                    if mfr != "Unknown" and not d.manufacturer:
+                        d.manufacturer = mfr
+                    if hostname and not d.hostname:
+                        d.hostname = hostname
+                    if ports:
+                        d.open_ports = json.dumps(ports)
+                    session.add(d)
 
-            # Mark offline existing devices that didn't respond
-        for ip, d in existing.items():
-            if ip not in live_ips and d.status == DeviceStatus.online:
-                d.status = DeviceStatus.offline
-                d.last_changed = datetime.now(timezone.utc)
+                elif ip not in pending_ips:
+                    # New device — add to pending queue
+                    p = PendingDevice(
+                        ip=ip, mac=mac,
+                        hostname=hostname or None,
+                        manufacturer=mfr if mfr != "Unknown" else None,
+                        open_ports=json.dumps(ports) if ports else None,
+                        detected_type=dtype,
+                        suggested_icon=dicon,
+                        confidence=confidence,
+                        signals=json.dumps(signals),
+                        first_seen=now,
+                    )
+                    session.add(p)
+                    new_count += 1
+
+            # Mark offline devices
+            for ip, d in known.items():
+                if ip not in live_ips and d.status != DeviceStatus.offline:
+                    d.status = DeviceStatus.offline
+                    d.last_changed = now
+                    session.add(d)
+                    # Create alert
+                    alert = Alert(
+                        level="warning",
+                        title=f"{d.name} went offline",
+                        message=f"{d.ip} ({d.mac}) was not found in the latest scan",
+                        device_id=d.id,
+                    )
+                    session.add(alert)
+
+            if new_count > 0:
                 alert = Alert(
-                    level="warning",
-                    title=f"{d.name} went offline",
-                    message=f"{d.ip} ({d.mac}) not seen in full scan",
-                    device_id=d.id,
+                    level="info",
+                    title=f"{new_count} new device{'s' if new_count > 1 else ''} found",
+                    message=f"Full scan discovered {new_count} new device(s). Review them in Discovery.",
                 )
                 session.add(alert)
 
-        event.completed_at  = datetime.now(timezone.utc)
-        event.devices_found = len(hosts)
-        event.new_devices   = new_count
-        event.status        = "completed"
-        session.add(event)
-        await session.commit()
+            scan.status        = "completed"
+            scan.completed_at  = now
+            scan.devices_found = len(live_ips)
+            scan.new_devices   = new_count
+            session.add(scan)
+            await session.commit()
+            _last_scan = now
 
-    logger.info(f"Full scan done — {len(hosts)} live, {new_count} new pending")
-    await ws_manager.broadcast({"type": "scan_complete", "scan_type": "full",
-                                "devices_found": len(hosts), "new_devices": new_count})
+            logger.info(f"Full scan done — {len(live_ips)} found, {new_count} new")
+            await manager.broadcast({
+                "event": "scan_complete", "type": "full",
+                "found": len(live_ips), "new": new_count
+            })
+
+        except Exception as e:
+            logger.error(f"Full scan error: {e}", exc_info=True)
+            scan.status = "error"
+            scan.error  = str(e)
+            scan.completed_at = datetime.now(timezone.utc)
+            session.add(scan)
+            await session.commit()

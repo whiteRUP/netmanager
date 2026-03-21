@@ -12,16 +12,18 @@ class WebSocketManager:
     async def connect(self, ws: WebSocket):
         await ws.accept()
         self.connections.append(ws)
+        logger.info(f"WS connected — {len(self.connections)} total")
 
     def disconnect(self, ws: WebSocket):
-        if ws in self.connections:
-            self.connections.remove(ws)
+        self.connections = [c for c in self.connections if c is not ws]
+        logger.info(f"WS disconnected — {len(self.connections)} total")
 
     async def broadcast(self, data: dict):
         dead = []
+        msg = json.dumps(data, default=str)
         for ws in self.connections:
             try:
-                await ws.send_text(json.dumps(data, default=str))
+                await ws.send_text(msg)
             except Exception:
                 dead.append(ws)
         for ws in dead:

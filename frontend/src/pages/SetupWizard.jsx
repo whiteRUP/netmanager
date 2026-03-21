@@ -1,170 +1,179 @@
 import { useState } from 'react'
 import { api } from '../api.js'
 
-const S = {
-  wrap: { minHeight:'100vh', display:'flex', alignItems:'center',
-          justifyContent:'center', padding:24 },
-  card: { background:'#1e293b', border:'1px solid rgba(148,163,184,0.15)',
-          borderRadius:16, padding:40, width:'100%', maxWidth:480 },
-  logo: { display:'flex', alignItems:'center', gap:12, marginBottom:32 },
-  logoIcon: { width:44, height:44, background:'#0f172a', borderRadius:12,
-              display:'flex', alignItems:'center', justifyContent:'center',
-              fontSize:22 },
-  title: { fontSize:22, fontWeight:700 },
-  sub:   { color:'#94a3b8', fontSize:13, marginTop:2 },
-  step:  { display:'flex', gap:8, marginBottom:32 },
-  dot:   (a) => ({ width:8, height:8, borderRadius:'50%', marginTop:6,
-                   background: a ? '#38bdf8' : '#334155', transition:'.2s' }),
-  label: { fontSize:12, color:'#94a3b8', marginBottom:6 },
-  input: { width:'100%', marginBottom:16, padding:'10px 14px',
-           background:'#0f172a', border:'1px solid rgba(148,163,184,0.2)',
-           borderRadius:8, color:'#f1f5f9', fontSize:14 },
-  btn:   { width:'100%', padding:'11px 0', background:'#38bdf8',
-           color:'#0f172a', border:'none', borderRadius:8,
-           fontWeight:700, fontSize:15, cursor:'pointer', marginTop:8 },
-  err:   { background:'rgba(239,68,68,0.12)', color:'#ef4444',
-           border:'1px solid rgba(239,68,68,0.2)', borderRadius:8,
-           padding:'10px 14px', fontSize:13, marginBottom:16 },
-  sectionTitle: { fontSize:13, fontWeight:600, color:'#94a3b8',
-                  textTransform:'uppercase', letterSpacing:'.06em',
-                  marginBottom:16, marginTop:8 },
-  row: { display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 },
-}
-
-const STEPS = ['Account', 'Network', 'Done']
+const STEPS = ['Account', 'Network', 'Finish']
 
 export default function SetupWizard({ onComplete }) {
-  const [step, setStep]     = useState(0)
-  const [err, setErr]       = useState('')
-  const [loading, setLoading] = useState(false)
-  const [form, setForm]     = useState({
+  const [step,    setStep]    = useState(0)
+  const [form,    setForm]    = useState({
     username: '', password: '', confirm: '',
-    app_name: 'NetManager',
-    scan_network: '192.168.1.0/24',
-    ping_interval: 60,
-    full_scan_interval: 900,
+    app_name: 'NetManager', scan_network: '192.168.1.0/24',
   })
+  const [error,   setError]   = useState('')
+  const [loading, setLoading] = useState(false)
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
   async function submit() {
-    setErr('')
+    setError(''); setLoading(true)
+    try {
+      await api.setup.init({
+        username:     form.username,
+        password:     form.password,
+        app_name:     form.app_name,
+        scan_network: form.scan_network,
+      })
+      onComplete(form.app_name)
+    } catch (e) {
+      setError(e.message)
+    } finally { setLoading(false) }
+  }
+
+  function next() {
     if (step === 0) {
-      if (form.username.length < 3) return setErr('Username must be at least 3 characters')
-      if (form.password.length < 6) return setErr('Password must be at least 6 characters')
-      if (form.password !== form.confirm) return setErr('Passwords do not match')
-      setStep(1)
-      return
+      if (!form.username.trim()) return setError('Username is required')
+      if (form.password.length < 6) return setError('Password must be at least 6 characters')
+      if (form.password !== form.confirm) return setError('Passwords do not match')
     }
     if (step === 1) {
-      setLoading(true)
-      try {
-        await api.setup.init({
-          username:           form.username,
-          password:           form.password,
-          app_name:           form.app_name,
-          scan_network:       form.scan_network,
-          ping_interval:      Number(form.ping_interval),
-          full_scan_interval: Number(form.full_scan_interval),
-        })
-        setStep(2)
-      } catch (e) {
-        setErr(e.message)
-      } finally {
-        setLoading(false)
-      }
+      if (!form.scan_network.trim()) return setError('Network range is required')
     }
+    setError('')
+    if (step < 2) setStep(s => s + 1)
+    else submit()
   }
 
   return (
-    <div style={S.wrap}>
-      <div style={S.card}>
-        <div style={S.logo}>
-          <div style={S.logoIcon}>🌐</div>
-          <div>
-            <div style={S.title}>NetManager</div>
-            <div style={S.sub}>Initial setup</div>
-          </div>
+    <div style={{
+      minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: 'var(--bg)', padding: 20,
+    }}>
+      <div style={{
+        width: '100%', maxWidth: 460,
+        background: 'var(--surface)',
+        border: '1px solid var(--border2)',
+        borderRadius: 20,
+        boxShadow: 'var(--shadow)',
+        overflow: 'hidden',
+      }}>
+        {/* Header */}
+        <div style={{
+          padding: '28px 32px 24px',
+          background: 'linear-gradient(135deg, rgba(59,130,246,.12) 0%, transparent 60%)',
+          borderBottom: '1px solid var(--border)',
+          textAlign: 'center',
+        }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>🌐</div>
+          <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>NetManager</div>
+          <div style={{ fontSize: 13, color: 'var(--text2)' }}>Initial setup — takes 30 seconds</div>
         </div>
 
-        <div style={S.step}>
-          {STEPS.map((s, i) => (
-            <div key={s} style={{ display:'flex', alignItems:'center', gap:6 }}>
-              <div style={S.dot(i <= step)} />
-              <span style={{ fontSize:12, color: i <= step ? '#38bdf8' : '#64748b' }}>{s}</span>
-              {i < STEPS.length - 1 && <div style={{ flex:1, height:1, background:'#334155', minWidth:20 }} />}
+        {/* Step bar */}
+        <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
+          {STEPS.map((label, i) => (
+            <div key={i} style={{
+              flex: 1, padding: '10px 0', textAlign: 'center',
+              fontSize: 12, fontWeight: 600,
+              color: i === step ? 'var(--accent2)' : i < step ? 'var(--green)' : 'var(--text3)',
+              borderBottom: i === step ? '2px solid var(--accent)' : '2px solid transparent',
+              transition: 'var(--transition)',
+            }}>
+              {i < step ? '✓ ' : `${i + 1}. `}{label}
             </div>
           ))}
         </div>
 
-        {err && <div style={S.err}>{err}</div>}
+        {/* Content */}
+        <div style={{ padding: '28px 32px' }}>
+          {error && (
+            <div className="error-banner" style={{ marginBottom: 20 }}>
+              <span>{error}</span>
+              <button onClick={() => setError('')} style={{ background: 'transparent', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>×</button>
+            </div>
+          )}
 
-        {step === 0 && (
-          <>
-            <div style={S.sectionTitle}>Create admin account</div>
-            <div style={S.label}>Username</div>
-            <input style={S.input} value={form.username}
-                   onChange={e => set('username', e.target.value)}
-                   placeholder="admin" autoFocus />
-            <div style={S.label}>Password</div>
-            <input style={S.input} type="password" value={form.password}
-                   onChange={e => set('password', e.target.value)}
-                   placeholder="At least 6 characters" />
-            <div style={S.label}>Confirm password</div>
-            <input style={S.input} type="password" value={form.confirm}
-                   onChange={e => set('confirm', e.target.value)}
-                   placeholder="Repeat password"
-                   onKeyDown={e => e.key === 'Enter' && submit()} />
-            <button style={S.btn} onClick={submit}>Continue →</button>
-          </>
-        )}
-
-        {step === 1 && (
-          <>
-            <div style={S.sectionTitle}>App & network settings</div>
-            <div style={S.label}>App name</div>
-            <input style={S.input} value={form.app_name}
-                   onChange={e => set('app_name', e.target.value)} />
-            <div style={S.label}>Network range (CIDR)</div>
-            <input style={S.input} value={form.scan_network}
-                   onChange={e => set('scan_network', e.target.value)}
-                   placeholder="192.168.1.0/24" />
-            <div style={S.row}>
-              <div>
-                <div style={S.label}>Ping interval (sec)</div>
-                <input style={{ ...S.input, marginBottom:0 }} type="number"
-                       value={form.ping_interval}
-                       onChange={e => set('ping_interval', e.target.value)} />
+          {step === 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div className="field">
+                <label>App name</label>
+                <input className="input" value={form.app_name}
+                  onChange={e => set('app_name', e.target.value)}
+                  placeholder="NetManager" />
               </div>
-              <div>
-                <div style={S.label}>Full scan (sec)</div>
-                <input style={{ ...S.input, marginBottom:0 }} type="number"
-                       value={form.full_scan_interval}
-                       onChange={e => set('full_scan_interval', e.target.value)} />
+              <div className="field">
+                <label>Username</label>
+                <input className="input" value={form.username}
+                  onChange={e => set('username', e.target.value)}
+                  placeholder="admin" autoFocus />
+              </div>
+              <div className="field">
+                <label>Password</label>
+                <input className="input" type="password" value={form.password}
+                  onChange={e => set('password', e.target.value)} />
+              </div>
+              <div className="field">
+                <label>Confirm password</label>
+                <input className="input" type="password" value={form.confirm}
+                  onChange={e => set('confirm', e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && next()} />
               </div>
             </div>
-            <div style={{ display:'flex', gap:10, marginTop:20 }}>
-              <button style={{ ...S.btn, background:'#334155', color:'#f1f5f9',
-                               flex:'0 0 auto', width:'auto', padding:'11px 20px' }}
-                      onClick={() => setStep(0)}>← Back</button>
-              <button style={{ ...S.btn, flex:1, marginTop:0 }}
-                      onClick={submit} disabled={loading}>
-                {loading ? 'Setting up…' : 'Complete setup'}
+          )}
+
+          {step === 1 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div className="field">
+                <label>Network range to scan</label>
+                <input className="input" value={form.scan_network}
+                  onChange={e => set('scan_network', e.target.value)}
+                  placeholder="192.168.1.0/24"
+                  autoFocus />
+              </div>
+              <div style={{
+                background: 'rgba(59,130,246,.07)', border: '1px solid rgba(59,130,246,.2)',
+                borderRadius: 10, padding: '12px 14px', fontSize: 12, color: 'var(--text2)',
+                lineHeight: 1.7,
+              }}>
+                <strong style={{ color: 'var(--accent2)' }}>💡 Tips</strong><br />
+                • Single network: <code style={{ color: 'var(--accent2)' }}>192.168.1.0/24</code><br />
+                • Multiple VLANs: <code style={{ color: 'var(--accent2)' }}>192.168.1.0/24, 10.0.0.0/24</code><br />
+                • Requires <code style={{ color: 'var(--accent2)' }}>network_mode: host</code> in Docker
+              </div>
+            </div>
+          )}
+
+          {step === 2 && (
+            <div style={{ textAlign: 'center', padding: '10px 0' }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>🚀</div>
+              <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Ready to launch</div>
+              <div style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 8 }}>
+                <strong style={{ color: 'var(--text)' }}>{form.app_name}</strong> will be configured with:<br />
+                User: <code style={{ color: 'var(--accent2)' }}>{form.username}</code><br />
+                Network: <code style={{ color: 'var(--accent2)' }}>{form.scan_network}</code>
+              </div>
+            </div>
+          )}
+
+          {/* Footer */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 24 }}>
+            {step > 0 && (
+              <button
+                onClick={() => { setError(''); setStep(s => s - 1) }}
+                className="btn btn-ghost"
+              >
+                ← Back
               </button>
-            </div>
-          </>
-        )}
-
-        {step === 2 && (
-          <div style={{ textAlign:'center' }}>
-            <div style={{ fontSize:48, marginBottom:16 }}>✅</div>
-            <div style={{ fontSize:18, fontWeight:700, marginBottom:8 }}>Setup complete!</div>
-            <div style={{ color:'#94a3b8', marginBottom:28, fontSize:14 }}>
-              Your NetManager instance is ready. Log in to get started.
-            </div>
-            <button style={S.btn} onClick={onComplete}>Go to login →</button>
+            )}
+            <button
+              onClick={next}
+              disabled={loading}
+              className="btn btn-primary"
+              style={{ flex: 1, justifyContent: 'center' }}
+            >
+              {loading ? 'Setting up…' : step < 2 ? 'Next →' : '✓ Complete setup'}
+            </button>
           </div>
-        )}
+        </div>
       </div>
     </div>
   )

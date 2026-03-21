@@ -4,51 +4,40 @@ from contextlib import asynccontextmanager
 import logging
 
 from database import init_db
-from services.scheduler import start_scheduler, stop_scheduler
 from routers import setup, auth, devices, integrations, scan, settings, ws
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("main")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("NetManager starting...")
     await init_db()
-
-    # Ensure integrations.json exists
-    from routers.integrations import _ensure_config
-    _ensure_config()
-
-    # Start scheduler only if setup is complete
-    from database import AsyncSessionLocal
-    from models import AppConfig
-    from sqlmodel import select
-    async with AsyncSessionLocal() as session:
-        r = await session.execute(
-            select(AppConfig).where(AppConfig.key == "setup_complete"))
-        row = r.scalar_one_or_none()
-        if row and row.value == "true":
-            await start_scheduler()
-            logger.info("Scheduler started")
-        else:
-            logger.info("Setup not complete — scheduler not started")
-
+    # Start scheduler only if setup is already complete
+    try:
+        from database import AsyncSessionLocal
+        from models import AppConfig
+        from sqlmodel import select
+        async with AsyncSessionLocal() as session:
+            r = await session.execute(select(AppConfig).where(AppConfig.key == "setup_complete"))
+            row = r.scalar_one_or_none()
+            if row and row.value == "true":
+                from services.scheduler import start_scheduler
+                await start_scheduler()
+                logger.info("Scheduler started at boot")
+            else:
+                logger.info("Setup not complete — scheduler not started")
+    except Exception as e:
+        logger.warning(f"Scheduler boot check failed: {e}")
     yield
-    await stop_scheduler()
-    logger.info("NetManager stopped")
+    try:
+        from services.scheduler import stop_scheduler
+        await stop_scheduler()
+    except Exception:
+        pass
 
 
-app = FastAPI(
-    title="NetManager API",
-    version="1.0.0",
-    lifespan=lifespan,
-    docs_url="/api/docs",
-    redoc_url=None
-)
+app = FastAPI(title="NetManager", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,18 +47,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Setup is PUBLIC — no auth
-app.include_router(setup.router,        prefix="/setup",        tags=["Setup"])
-
-# Everything else requires auth
-app.include_router(auth.router,         prefix="/auth",         tags=["Auth"])
-app.include_router(devices.router,      prefix="/devices",      tags=["Devices"])
-app.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])
-app.include_router(scan.router,         prefix="/scan",         tags=["Scan"])
-app.include_router(settings.router,     prefix="/settings",     tags=["Settings"])
-app.include_router(ws.router,           prefix="/ws",           tags=["WebSocket"])
+app.include_router(setup.router,        prefix="/api/setup")
+app.include_router(auth.router,         prefix="/api/auth")
+app.include_router(devices.router,      prefix="/api/devices")
+app.include_router(integrations.router, prefix="/api/integrations")
+app.include_router(scan.router,         prefix="/api/scan")
+app.include_router(settings.router,     prefix="/api/settings")
+app.include_router(ws.router,           prefix="/ws")
 
 
-@app.get("/health")
+@app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"ok": True}

@@ -1,41 +1,52 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api } from '../api.js'
 
 const NAV = [
-  { to: '/dashboard',    icon: '⊞',  label: 'Dashboard' },
-  { to: '/devices',      icon: '📡', label: 'Devices' },
-  { to: '/discovery',    icon: '🔍', label: 'Discovery' },
+  { to: '/dashboard',    icon: '⊞',  label: 'Dashboard'    },
+  { to: '/devices',      icon: '📡', label: 'Devices'      },
+  { to: '/discovery',    icon: '🔍', label: 'Discovery'    },
   { to: '/integrations', icon: '🔌', label: 'Integrations' },
-  { to: '/alerts',       icon: '🔔', label: 'Alerts' },
-  { to: '/settings',     icon: '⚙️', label: 'Settings' },
+  { to: '/alerts',       icon: '🔔', label: 'Alerts'       },
+  { to: '/settings',     icon: '⚙️', label: 'Settings'     },
 ]
 
-export default function Layout({ onLogout }) {
-  const [stats, setStats]       = useState(null)
-  const [scanning, setScanning] = useState(false)
-  const [unread, setUnread]     = useState(0)
-  const [appName, setAppName]   = useState('NetManager')
+export default function Layout({ appName, onLogout }) {
+  const [stats,    setStats]   = useState(null)
+  const [scanning, setScanning] = useState(null) // 'ping'|'full'|null
+  const [unread,   setUnread]  = useState(0)
+  const wsRef = useRef(null)
 
   useEffect(() => {
     loadStats()
-    loadAppName()
-    const id = setInterval(loadStats, 15000)
-    return () => clearInterval(id)
+    const id = setInterval(loadStats, 20000)
+    connectWS()
+    return () => {
+      clearInterval(id)
+      if (wsRef.current) wsRef.current.close()
+    }
   }, [])
 
-  async function loadAppName() {
-    try {
-      const s = await api.settings.get()
-      if (s.app_name) setAppName(s.app_name)
-    } catch {}
+  function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const ws = new WebSocket(`${proto}://${location.host}/ws/events`)
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data)
+        if (msg.event?.startsWith('scan') || msg.event?.startsWith('device')) {
+          loadStats()
+        }
+      } catch {}
+    }
+    ws.onclose = () => setTimeout(connectWS, 3000)
+    wsRef.current = ws
   }
 
   async function loadStats() {
     try {
       const [s, alerts] = await Promise.all([
         api.devices.stats(),
-        api.devices.alerts(true)
+        api.devices.alerts(true),
       ])
       setStats(s)
       setUnread(alerts.length)
@@ -43,106 +54,141 @@ export default function Layout({ onLogout }) {
   }
 
   async function triggerScan(type) {
-    setScanning(true)
+    if (scanning) return
+    setScanning(type)
     try { await api.scan.trigger(type) } catch {}
-    setTimeout(() => { setScanning(false); loadStats() }, 3000)
+    setTimeout(() => { setScanning(null); loadStats() }, 4000)
   }
 
   return (
-    <div style={{ display:'flex', height:'100vh', overflow:'hidden' }}>
-      {/* Sidebar */}
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+      {/* ── Sidebar ── */}
       <aside style={{
-        width: 220, flexShrink: 0,
-        background: '#1e293b',
-        borderRight: '1px solid rgba(148,163,184,0.1)',
+        width: 'var(--sidebar-w)', flexShrink: 0,
+        background: 'var(--surface)',
+        borderRight: '1px solid var(--border)',
         display: 'flex', flexDirection: 'column',
-        padding: '0 0 16px'
+        overflow: 'hidden',
       }}>
         {/* Logo */}
-        <div style={{ padding: '20px 20px 16px', borderBottom: '1px solid rgba(148,163,184,0.1)' }}>
-          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-            <span style={{ fontSize:20 }}>🌐</span>
-            <span style={{ fontWeight:700, fontSize:16 }}>{appName}</span>
+        <div style={{
+          padding: '18px 16px 14px',
+          borderBottom: '1px solid var(--border)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{
+              width: 32, height: 32, borderRadius: 8,
+              background: 'var(--accent)', display: 'flex',
+              alignItems: 'center', justifyContent: 'center',
+              fontSize: 16, flexShrink: 0
+            }}>🌐</span>
+            <span style={{
+              fontWeight: 700, fontSize: 15,
+              fontFamily: 'var(--mono)',
+              color: 'var(--text)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+            }}>{appName}</span>
           </div>
+
           {stats && (
-            <div style={{ marginTop:10, display:'flex', gap:8, flexWrap:'wrap' }}>
-              <Pill color="#22c55e" label={`${stats.online} online`} />
-              <Pill color="#ef4444" label={`${stats.offline} offline`} />
-              {stats.pending > 0 && <Pill color="#f59e0b" label={`${stats.pending} pending`} />}
+            <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <Pill label={`${stats.online} up`}    color="var(--green)" />
+              <Pill label={`${stats.offline} down`} color="var(--red)" />
+              {stats.pending > 0 && <Pill label={`${stats.pending} new`} color="var(--amber)" />}
             </div>
           )}
         </div>
 
         {/* Nav */}
-        <nav style={{ flex:1, padding:'12px 8px', display:'flex', flexDirection:'column', gap:2 }}>
+        <nav style={{ flex: 1, padding: '10px 8px', display: 'flex', flexDirection: 'column', gap: 2, overflowY: 'auto' }}>
           {NAV.map(({ to, icon, label }) => (
             <NavLink key={to} to={to} style={({ isActive }) => ({
               display: 'flex', alignItems: 'center', gap: 10,
-              padding: '8px 12px', borderRadius: 8, fontSize: 14,
-              color: isActive ? '#38bdf8' : '#94a3b8',
-              background: isActive ? 'rgba(56,189,248,0.1)' : 'transparent',
-              transition: '.15s', position: 'relative'
+              padding: '8px 10px', borderRadius: 8, fontSize: 13,
+              color: isActive ? 'var(--accent2)' : 'var(--text2)',
+              background: isActive ? 'rgba(59,130,246,.1)' : 'transparent',
+              transition: 'var(--transition)', position: 'relative',
+              fontWeight: isActive ? 600 : 400,
+              textDecoration: 'none',
             })}>
-              <span style={{ fontSize:16 }}>{icon}</span>
-              {label}
+              <span style={{ fontSize: 16, width: 20, textAlign: 'center' }}>{icon}</span>
+              <span style={{ flex: 1 }}>{label}</span>
               {label === 'Alerts' && unread > 0 && (
                 <span style={{
-                  marginLeft:'auto', background:'#ef4444', color:'#fff',
-                  fontSize:11, fontWeight:700, borderRadius:10,
-                  padding:'1px 6px', minWidth:18, textAlign:'center'
-                }}>{unread}</span>
+                  background: 'var(--red)', color: '#fff', fontSize: 10,
+                  fontWeight: 700, borderRadius: 99, padding: '1px 5px', minWidth: 16,
+                  textAlign: 'center',
+                }}>{unread > 99 ? '99+' : unread}</span>
               )}
               {label === 'Discovery' && stats?.pending > 0 && (
                 <span style={{
-                  marginLeft:'auto', background:'#f59e0b', color:'#0f172a',
-                  fontSize:11, fontWeight:700, borderRadius:10,
-                  padding:'1px 6px', minWidth:18, textAlign:'center'
-                }}>{stats.pending}</span>
+                  background: 'var(--amber)', color: '#0f172a', fontSize: 10,
+                  fontWeight: 700, borderRadius: 99, padding: '1px 5px', minWidth: 16,
+                  textAlign: 'center',
+                }}>{stats.pending > 99 ? '99+' : stats.pending}</span>
               )}
             </NavLink>
           ))}
         </nav>
 
         {/* Scan buttons */}
-        <div style={{ padding:'0 8px 8px', display:'flex', flexDirection:'column', gap:6 }}>
-          <button onClick={() => triggerScan('ping')} disabled={scanning}
-            style={{ padding:'7px 12px', background:'transparent',
-                     border:'1px solid rgba(148,163,184,0.2)', borderRadius:8,
-                     color:'#94a3b8', fontSize:13, cursor:'pointer' }}>
-            {scanning ? '⏳ Scanning…' : '⚡ Ping scan'}
+        <div style={{ padding: '0 8px 8px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <button
+            onClick={() => triggerScan('ping')}
+            disabled={!!scanning}
+            className="btn btn-ghost"
+            style={{ justifyContent: 'center', fontSize: 12 }}
+          >
+            {scanning === 'ping' ? <Spinner /> : '⚡'}
+            {scanning === 'ping' ? 'Scanning…' : 'Ping scan'}
           </button>
-          <button onClick={() => triggerScan('full')} disabled={scanning}
-            style={{ padding:'7px 12px', background:'transparent',
-                     border:'1px solid rgba(148,163,184,0.2)', borderRadius:8,
-                     color:'#94a3b8', fontSize:13, cursor:'pointer' }}>
-            🔍 Full scan
+          <button
+            onClick={() => triggerScan('full')}
+            disabled={!!scanning}
+            className="btn btn-ghost"
+            style={{ justifyContent: 'center', fontSize: 12 }}
+          >
+            {scanning === 'full' ? <Spinner /> : '🔍'}
+            {scanning === 'full' ? 'Scanning…' : 'Full scan'}
           </button>
         </div>
 
         {/* Logout */}
-        <div style={{ padding:'0 8px' }}>
-          <button onClick={onLogout}
-            style={{ width:'100%', padding:'7px 12px', background:'transparent',
-                     border:'1px solid rgba(148,163,184,0.15)', borderRadius:8,
-                     color:'#64748b', fontSize:13, cursor:'pointer' }}>
+        <div style={{ padding: '0 8px 12px' }}>
+          <button
+            onClick={onLogout}
+            className="btn btn-ghost"
+            style={{ width: '100%', justifyContent: 'center', fontSize: 12, color: 'var(--text3)' }}
+          >
             Sign out
           </button>
         </div>
       </aside>
 
-      {/* Main */}
-      <main style={{ flex:1, overflowY:'auto', padding:28, background:'#0f172a' }}>
+      {/* ── Main ── */}
+      <main style={{ flex: 1, overflowY: 'auto', background: 'var(--bg)', padding: 28 }}>
         <Outlet />
       </main>
     </div>
   )
 }
 
-function Pill({ color, label }) {
+function Pill({ label, color }) {
   return (
     <span style={{
-      fontSize:11, padding:'2px 8px', borderRadius:20,
-      background: color + '20', color, border:`1px solid ${color}40`
+      fontSize: 11, padding: '2px 7px', borderRadius: 99,
+      background: color + '18', color, border: `1px solid ${color}30`,
+      fontWeight: 600,
     }}>{label}</span>
+  )
+}
+
+function Spinner() {
+  return (
+    <span style={{
+      width: 12, height: 12, border: '2px solid var(--border2)',
+      borderTopColor: 'var(--accent)', borderRadius: '50%',
+      display: 'inline-block', animation: 'spin .6s linear infinite',
+    }} />
   )
 }
